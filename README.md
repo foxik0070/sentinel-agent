@@ -1,5 +1,5 @@
 # Sentinel Agent
-
+![sentinel-agent](sentinel_agent.png)
 ![License: MIT](https://img.shields.io/badge/License-MIT-cyan.svg)
 ![Python](https://img.shields.io/badge/python-3.13%2B-blue)
 ![Mode](https://img.shields.io/badge/mode-outbound--only-green)
