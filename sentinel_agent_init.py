@@ -139,7 +139,7 @@ def load_existing_config():
             "git_auto_update": False
         },
         "sentinel_api": {
-            "url": "http://192.168.2.114:5050",
+            "url": "http://192.168.1.100:5050",
             "token": "",
             "hostname": socket.gethostname()
         },
