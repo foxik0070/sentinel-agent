@@ -102,6 +102,11 @@ class SentinelAgent:
         # --- Persistence Files Baseline (authorized_keys, cron) ---
         self.persistence_file_hashes = {}
         self.persistence_files_initialized = False
+
+        # --- System-wide SUID/SGID Baseline (scanned every N cycles) ---
+        self.suid_baseline = set()
+        self.suid_baseline_initialized = False
+        self.suid_cycle_counter = 0
         self.state_file = self.config.get('agent_core', {}).get('state_file', '/var/lib/sentinel/state.json')
 
         # --- HTTP Session (optional source IP binding to prevent multi-IP duplicates) ---
@@ -134,6 +139,9 @@ class SentinelAgent:
             if baselines.get('persistence_files'):
                 self.persistence_file_hashes = baselines['persistence_files']
                 self.persistence_files_initialized = True
+            if baselines.get('suid_files'):
+                self.suid_baseline = set(baselines['suid_files'])
+                self.suid_baseline_initialized = True
             print(f"[*] Restored persisted state: {len(self.active_issues)} active issues, "
                   f"{len(self.last_reported_states)} reported states, integrity baselines "
                   f"{'restored' if self.critical_files_initialized else 'fresh'}.", flush=True)
@@ -588,6 +596,38 @@ class SentinelAgent:
         except Exception:
             return None
 
+    def _journal_delta(self, cursor_filename, journal_args):
+        """Returns journal lines new since the last call (persistent cursor next to
+        the state file), [] when nothing new, or None if the journal is unavailable."""
+        cursor_file = os.path.join(os.path.dirname(self.state_file) or "/var/lib/sentinel", cursor_filename)
+        try:
+            if not os.path.exists(cursor_file):
+                os.makedirs(os.path.dirname(cursor_file), exist_ok=True)
+                init_proc = subprocess.run(
+                    ["journalctl"] + journal_args + ["-n", "1", "-o", "cat", f"--cursor-file={cursor_file}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+                )
+                if init_proc.returncode == 0 and os.path.exists(cursor_file):
+                    return []
+                return None
+            proc = subprocess.run(
+                ["journalctl"] + journal_args + ["-o", "cat", f"--cursor-file={cursor_file}", "--no-pager"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30
+            )
+            if proc.returncode != 0:
+                return None
+            return proc.stdout.splitlines()
+        except Exception:
+            return None
+
+    def _scan_suid_files(self):
+        """Full-filesystem SUID/SGID inventory (single device, /proc etc. excluded)."""
+        proc = subprocess.run(
+            ["find", "/", "-xdev", "-type", "f", "(", "-perm", "-4000", "-o", "-perm", "-2000", ")"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120
+        )
+        return set(l for l in proc.stdout.splitlines() if l.strip())
+
     def _collect_persistence_files(self):
         """Returns paths of files attackers modify for post-exploit persistence:
         SSH authorized_keys (root + users) and cron entries."""
@@ -782,6 +822,73 @@ class SentinelAgent:
                 })
         except Exception as e:
             print(f"[-] SUID temp dir scan failure: {e}", flush=True)
+
+        # --- 5. System-wide SUID/SGID baseline (event-style, scanned every 10 cycles) ---
+        # Kernel LPE exploits and package backdoors typically plant a SUID shell.
+        # Full-filesystem find is too heavy for every cycle, hence the reduced cadence.
+        try:
+            if self.suid_cycle_counter % 10 == 0:
+                current_suid = self._scan_suid_files()
+                if not self.suid_baseline_initialized:
+                    self.suid_baseline = current_suid
+                    self.suid_baseline_initialized = True
+                    print(f"[*] SUID/SGID baseline compiled: {len(current_suid)} files tracked.", flush=True)
+                else:
+                    new_files = sorted(current_suid - self.suid_baseline)
+                    state_key = "security:suid_baseline"
+                    if new_files:
+                        msg = f"New SUID/SGID binaries appeared since baseline: {', '.join(new_files[:10])}{'...' if len(new_files) > 10 else ''}. Verify this was a legitimate package install (exploits plant SUID shells for persistence)."
+                        self.suid_baseline = current_suid
+                        self.last_reported_states[state_key] = msg
+                        events.append({
+                            "plugin": "agent_security_suspicious_activity",
+                            "target": "suid_baseline",
+                            "status": "CRITICAL",
+                            "message": msg
+                        })
+                    else:
+                        self.suid_baseline = current_suid  # absorb removals silently
+                        msg = "System-wide SUID/SGID inventory matches trusted baseline."
+                        if self.should_report(state_key, msg):
+                            events.append({
+                                "plugin": "agent_security_suspicious_activity",
+                                "target": "suid_baseline",
+                                "status": "OK",
+                                "message": msg
+                            })
+            self.suid_cycle_counter += 1
+        except Exception as e:
+            print(f"[-] SUID baseline scan failure: {e}", flush=True)
+
+        # --- 6. sudo/su authentication failure burst (event-style, journal cursor) ---
+        try:
+            lines = self._journal_delta("auth_journal.cursor", ["-t", "sudo", "-t", "su"])
+            if lines is not None:
+                fails = [l for l in lines if re.search(
+                    r"authentication failure|FAILED SU|NOT in sudoers|incorrect password attempt", l, re.IGNORECASE)]
+                threshold = self.config.get('checks', {}).get('security', {}).get('sudo_fail_threshold', 3)
+                state_key = "security:auth_failures"
+                if len(fails) >= threshold:
+                    sample = " | ".join(f.strip()[:90] for f in fails[:3])
+                    msg = f"Privilege escalation attempts! {len(fails)} sudo/su authentication failures since last cycle. Samples: {sample}"
+                    self.last_reported_states[state_key] = msg
+                    events.append({
+                        "plugin": "agent_security_suspicious_activity",
+                        "target": "auth_failures",
+                        "status": "WARNING",
+                        "message": msg
+                    })
+                else:
+                    msg = "Local sudo/su authentication activity within normal limits."
+                    if self.should_report(state_key, msg):
+                        events.append({
+                            "plugin": "agent_security_suspicious_activity",
+                            "target": "auth_failures",
+                            "status": "OK",
+                            "message": msg
+                        })
+        except Exception as e:
+            print(f"[-] Auth failure journal scan error: {e}", flush=True)
 
         return events
 
@@ -1466,7 +1573,8 @@ class SentinelAgent:
                     "pending_events": self.pending_events,
                     "baselines": {
                         "critical_files": self.critical_file_hashes,
-                        "persistence_files": self.persistence_file_hashes
+                        "persistence_files": self.persistence_file_hashes,
+                        "suid_files": sorted(self.suid_baseline)
                     }
                 }, f, indent=2)
         except Exception as e:

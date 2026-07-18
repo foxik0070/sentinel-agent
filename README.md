@@ -282,6 +282,8 @@ The monolithic agent execution block contains 25 built-in sub-modules. Each modu
     *   **uid0_accounts:** Parses `/etc/passwd` for non-root accounts with UID 0 (privilege escalation backdoor). Persistent `CRITICAL` while present.
     *   **processes:** Walks `/proc` and flags processes executing from `/tmp`, `/var/tmp`, `/dev/shm`, fileless (memfd) executables, processes running from deleted binaries outside system paths (self-deleting payloads; `/usr`, `/opt`, `/lib`, ... are excluded to avoid package-upgrade false positives), known cryptominer names (xmrig, kinsing, kdevtmpfsi, ...), and reverse-shell patterns in command lines (`/dev/tcp/`, `nc -e`, `socat exec`, `pty.spawn`, ...).
     *   **suid_binaries:** Runs `find` over temp directories for SUID-root files (exploit staging artifacts).
+    *   **suid_baseline:** Full-filesystem SUID/SGID inventory (single device, rescanned every 10 cycles). A newly appeared SUID/SGID binary triggers `CRITICAL` — LPE exploits and backdoored packages plant SUID shells for persistence. Removals are absorbed silently. The baseline persists across restarts.
+    *   **auth_failures:** Reads `sudo`/`su` journal entries incrementally (persistent cursor). If authentication failures since the last cycle reach `security.sudo_fail_threshold` (default `3`), it triggers a `WARNING` with sample lines — a burst signals a privilege-escalation attempt.
 
 ### 23. `agent_security_kernel_cve`
 *   **Mechanism:** Parses `os.uname().release` into a `(major, minor, patch)` tuple and compares it against a static table of well-known, actively-abused local privilege escalation CVE ranges. Controlled by `security.scan_cves`.
@@ -400,7 +402,9 @@ checks:
     fail2ban_stats: true        # Alert when active ban count exceeds 50
     monitor_suspicious: true    # Exploit footprints: critical file & authorized_keys/cron integrity,
                                 # LD_PRELOAD rootkits, UID 0 backdoors, processes from /tmp,
-                                # cryptominers, reverse shells, SUID binaries in temp dirs
+                                # cryptominers, reverse shells, SUID in temp dirs, system-wide
+                                # SUID/SGID baseline, sudo/su auth-failure bursts
+    sudo_fail_threshold: 3      # sudo/su auth failures per cycle before a WARNING is raised
     ssl_certs:
       - /etc/letsencrypt/live/example.com/fullchain.pem
 ```

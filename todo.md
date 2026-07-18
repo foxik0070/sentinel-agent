@@ -8,10 +8,10 @@
 2. ✅ ~~Monitoring nových cronů~~ — HOTOVO: /etc/crontab, /etc/cron.d, /var/spool/cron v persistence_files baseline. Zbývá: systemd timery.
 3. ✅ ~~Detekce procesů se smazaným binárním souborem~~ — HOTOVO: deleted exe mimo systémové cesty + fileless memfd exekutably.
 4. ✅ ~~Kontrola `LD_PRELOAD` a `/etc/ld.so.preload`~~ — HOTOVO: CRITICAL při neprázdném /etc/ld.so.preload.
-5. 🟡 Baseline SUID/SGID binárek v celém systému (ne jen temp dirs) — alert na nově přibyvší SUID soubor.
+5. ✅ ~~Baseline SUID/SGID binárek v celém systému~~ — HOTOVO: celosystémový sken každých 10 cyklů, CRITICAL na nový SUID/SGID, persistence baseline přes restart.
 6. 🟡 Detekce promiskuitního režimu síťových rozhraní (sniffing) — flag IFF_PROMISC z `/sys/class/net/*/flags`.
 7. 🟡 Kontrola podezřelých odchozích spojení — spojení na známé miner pooly / neobvyklé porty (4444, 1337, stratum+tcp).
-8. 🟡 Monitoring selhání sudo/su pokusů z journalu (`journalctl _COMM=sudo`) — burst selhání = pokus o eskalaci.
+8. ✅ ~~Monitoring selhání sudo/su pokusů z journalu~~ — HOTOVO: journal cursor delta, WARNING při burstu ≥ sudo_fail_threshold (default 3) za cyklus.
 9. 🟡 Detekce nově přidaných uživatelů do skupin sudo/wheel/docker (docker skupina = root ekvivalent).
 10. 🟡 Kontrola kernel modulů proti baseline (`lsmod`) — nový neznámý modul může být rootkit.
 11. 🟡 Rozšířit reverse-shell vzory o perl/php/ruby one-linery a msfvenom stopy.
