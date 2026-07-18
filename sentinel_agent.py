@@ -819,6 +819,59 @@ class SentinelAgent:
             })
         return events
 
+    # vcgencmd get_throttled bitmask (Raspberry Pi firmware).
+    # Bits 0-3 = active conditions, bits 16-19 = occurred since boot.
+    RPI_THROTTLE_BITS = [
+        (0,  "CRITICAL", "under-voltage detected NOW"),
+        (1,  "WARNING",  "ARM frequency capped NOW"),
+        (2,  "WARNING",  "currently throttled NOW"),
+        (3,  "WARNING",  "soft temperature limit active NOW"),
+        (16, "WARNING",  "under-voltage occurred since boot"),
+        (17, "WARNING",  "ARM frequency capping occurred since boot"),
+        (18, "WARNING",  "throttling occurred since boot"),
+        (19, "WARNING",  "soft temperature limit occurred since boot"),
+    ]
+
+    def check_rpi_throttling(self):
+        """Raspberry Pi undervoltage/throttling via vcgencmd get_throttled.
+        Undervoltage is the most common cause of mysterious RPi instability
+        (bad PSU/cable) - often more important than the temperature itself."""
+        events = []
+        if not self.config.get('checks', {}).get('hardware', {}).get('monitor_rpi_throttling', False):
+            return events
+
+        try:
+            proc = subprocess.run(["vcgencmd", "get_throttled"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+        except FileNotFoundError:
+            return events  # not a Raspberry Pi
+        except Exception as e:
+            print(f"[-] vcgencmd execution failure: {e}", flush=True)
+            return events
+
+        match = re.search(r'throttled=(0x[0-9a-fA-F]+)', proc.stdout)
+        if not match:
+            return events
+        value = int(match.group(1), 16)
+
+        flags = [(sev, desc) for bit, sev, desc in self.RPI_THROTTLE_BITS if value & (1 << bit)]
+        state_key = "hardware:rpi_throttling"
+
+        if flags:
+            current_status = "CRITICAL" if any(sev == "CRITICAL" for sev, _ in flags) else "WARNING"
+            msg = f"Power/thermal firmware flags active ({hex(value)}): {'; '.join(d for _, d in flags)}. Check PSU/cable and cooling."
+        else:
+            current_status = "OK"
+            msg = "Firmware power and thermal profile clean (no undervoltage or throttling flags)."
+
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_rpi_power_monitor",
+                "target": "firmware_throttling",
+                "status": current_status,
+                "message": msg
+            })
+        return events
+
     def check_storage_capacity(self):
         events = []
         storage_config = self.config.get('checks', {}).get('storage', {})
@@ -1008,43 +1061,74 @@ class SentinelAgent:
                 print(f"[-] SMART health check error for {drive}: {e}", flush=True)
         return events
 
+    OOM_REGEX = r"(Out of memory: Kill process|Killed process \d+ \(.+?\) total-vm)"
+
+    def _oom_event(self, kill_count):
+        state_key = "kernel:oom_events"
+        if kill_count > 0:
+            msg = f"Kernel Architecture Error! Out-Of-Memory (OOM) killer context triggered. {kill_count} processes terminated."
+            self.last_reported_states[state_key] = msg
+            return [{
+                "plugin": "agent_kernel_oom_monitor",
+                "target": "oom_killer",
+                "status": "CRITICAL",
+                "message": msg
+            }]
+        msg = "Kernel memory allocation subsystems operating within safe structural limits."
+        if self.should_report(state_key, msg):
+            return [{
+                "plugin": "agent_kernel_oom_monitor",
+                "target": "oom_killer",
+                "status": "OK",
+                "message": msg
+            }]
+        return []
+
     def check_oom_killer_events(self):
+        """OOM kill detection. Primary: journal cursor (exact, survives ring buffer
+        rotation and agent restarts). Fallback: dmesg count delta (non-systemd hosts)."""
         events = []
         if not self.config.get('checks', {}).get('kernel', {}).get('monitor_oom', False):
             return events
 
+        # --- Primary: kernel journal with persistent cursor ---
+        cursor_file = os.path.join(os.path.dirname(self.state_file) or "/var/lib/sentinel", "oom_journal.cursor")
+        try:
+            if not os.path.exists(cursor_file):
+                os.makedirs(os.path.dirname(cursor_file), exist_ok=True)
+                init_proc = subprocess.run(
+                    ["journalctl", "-k", "-n", "1", "-o", "cat", f"--cursor-file={cursor_file}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+                )
+                if init_proc.returncode == 0 and os.path.exists(cursor_file):
+                    return events  # cursor initialized; deltas count from next cycle
+                raise RuntimeError("journal cursor initialization failed")
+
+            proc = subprocess.run(
+                ["journalctl", "-k", "-o", "cat", f"--cursor-file={cursor_file}", "--no-pager"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"journalctl exited {proc.returncode}")
+
+            new_kills = len(re.findall(self.OOM_REGEX, proc.stdout, re.IGNORECASE))
+            return self._oom_event(new_kills)
+        except Exception:
+            pass  # journal unavailable - fall through to dmesg counting
+
+        # --- Fallback: dmesg occurrence count delta ---
         try:
             proc = subprocess.run(["dmesg"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
-            oom_hits = re.findall(r"(Out of memory: Kill process|Killed process \d+ \(.+?\) total-vm)", proc.stdout, re.IGNORECASE)
-            current_count = len(oom_hits)
+            current_count = len(re.findall(self.OOM_REGEX, proc.stdout, re.IGNORECASE))
 
             if not self.oom_initialized:
                 self.last_oom_count = current_count
                 self.oom_initialized = True
                 return events
 
-            state_key = "kernel:oom_events"
-            if current_count > self.last_oom_count:
-                current_status = "CRITICAL"
-                msg = f"Kernel Architecture Error! Out-Of-Memory (OOM) killer context triggered. {current_count - self.last_oom_count} processes terminated."
-                self.last_reported_states[state_key] = msg
-                self.last_oom_count = current_count
-                
-                events.append({
-                    "plugin": "agent_kernel_oom_monitor",
-                    "target": "oom_killer",
-                    "status": current_status,
-                    "message": msg
-                })
-            else:
-                msg = "Kernel memory allocation subsystems operating within safe structural limits."
-                if self.should_report(state_key, msg):
-                    events.append({
-                        "plugin": "agent_kernel_oom_monitor",
-                        "target": "oom_killer",
-                        "status": "OK",
-                        "message": msg
-                    })
+            new_kills = max(0, current_count - self.last_oom_count)
+            self.last_oom_count = current_count
+            return self._oom_event(new_kills)
         except Exception as e:
             print(f"[-] OOM ring buffer tracking failure: {e}")
         return events
@@ -1517,6 +1601,7 @@ class SentinelAgent:
                 events.extend(self.check_suspicious_activity())
                 events.extend(self.check_kernel_cves())
                 events.extend(self.check_temperature())
+                events.extend(self.check_rpi_throttling())
                 events.extend(self.check_storage_capacity())
                 events.extend(self.check_raid_arrays())
                 events.extend(self.check_ssd_wearout())

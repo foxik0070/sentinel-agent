@@ -51,6 +51,7 @@ LANG_DICT = {
         'int_push': "Jak casto (v sekundach) se maji posilat data na server.",
         'int_boot': "Cas (v sekundach), po ktery agent po startu ceka na nabehnuti ostatnich sluzeb (zabranuje falesnym poplachum).",
         'temp': "Sleduje teplotu procesoru a upozorni na pripadne prehrati hardware.",
+        'rpi_throttle': "Raspberry Pi: cte firmware flagy (vcgencmd get_throttled) - undervoltage (vadny zdroj/kabel), CPU throttling, teplotni limity. Na jinem hardware se automaticky preskoci.",
         'storage': "Sleduje volne misto a inody na disku, cimz predchazi chybam typu 'disk is full'.",
         'wearout': "Vyuziva SMART data pro detekci bliziciho se konce zivotnosti SSD/NVMe disku.",
         'raid': "Sleduje stav softwarovych diskovych poli (mdadm) a varuje pri jejich degradaci.",
@@ -84,6 +85,7 @@ LANG_DICT = {
         'int_push': "How often (in seconds) to send telemetry data to the server.",
         'int_boot': "Time (in seconds) the agent waits after boot for other services to start (prevents false alerts).",
         'temp': "Monitors CPU temperature and alerts on hardware overheating.",
+        'rpi_throttle': "Raspberry Pi: reads firmware flags (vcgencmd get_throttled) - undervoltage (bad PSU/cable), CPU throttling, thermal limits. Automatically skipped on other hardware.",
         'storage': "Monitors free space and inodes on disks to prevent 'disk is full' errors.",
         'wearout': "Uses SMART data to detect impending SSD/NVMe drive failure/lifespan end.",
         'raid': "Monitors the state of software disk arrays (mdadm) and warns on degradation.",
@@ -164,6 +166,7 @@ def load_existing_config():
             "services": [],
             "mounts": [],
             "temperature": {"enabled": True, "warning": 75.0, "critical": 85.0},
+            "hardware": {"monitor_rpi_throttling": True},
             "storage": {"enabled": True, "paths": ["/"], "warn_percent": 85, "crit_percent": 95, "monitor_wearout": True, "monitor_raid": True, "monitor_disk_health": False},
             "memory": {"enabled": True, "warn_percent": 85, "crit_percent": 95, "monitor_swap": True},
             "kernel": {"monitor_oom": True, "monitor_zombies": True, "max_zombies": 5, "monitor_io_hangs": True, "monitor_taint": True},
@@ -447,6 +450,9 @@ def main(lang):
     if cfg["checks"]["temperature"]["enabled"]:
         cfg["checks"]["temperature"]["warning"] = float(prompt_input("CPU Temperature WARNING threshold (C)", cfg["checks"]["temperature"].get("warning", 75.0)))
         cfg["checks"]["temperature"]["critical"] = float(prompt_input("CPU Temperature CRITICAL threshold (C)", cfg["checks"]["temperature"].get("critical", 85.0)))
+
+    cfg["checks"].setdefault("hardware", {})
+    cfg["checks"]["hardware"]["monitor_rpi_throttling"] = prompt_bool("Monitor Raspberry Pi undervoltage/throttling (vcgencmd)", cfg["checks"]["hardware"].get("monitor_rpi_throttling", True), txt['rpi_throttle'])
 
     cfg["checks"]["storage"]["enabled"] = prompt_bool("Monitor structural storage metrics (Space/Inodes)", cfg["checks"]["storage"].get("enabled", True), txt['storage'])
     if cfg["checks"]["storage"]["enabled"]:

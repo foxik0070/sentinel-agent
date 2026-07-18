@@ -36,7 +36,7 @@
 24. ✅ ~~Timeout u všech subprocess.run volání~~ — HOTOVO: 10–120 s podle nástroje (smartctl 30 s, apt/dnf 120 s).
 25. 🟡 Watchdog integrace se systemd (`WatchdogSec` + `sd_notify`) — detekce zamrzlého agenta.
 26. 🟡 Hlídat vlastní paměť/CPU agenta a self-restart při překročení limitu.
-27. 🟡 dmesg čtení: použít `dmesg --since` nebo journal kursor místo full-scan + regex countu (ring buffer se přetáčí → OOM count je nespolehlivý).
+27. ✅ ~~OOM přes journal kursor~~ — HOTOVO: `journalctl -k --cursor-file` (přesné, přežije rotaci bufferu i restart agenta), dmesg fallback pro non-systemd.
 28. 🟢 Config reload na SIGHUP bez restartu služby.
 29. 🟢 Validace config schématu při startu (chybějící klíč → srozumitelná chyba místo KeyError).
 30. 🟢 `--dry-run` režim: proveď všechny checky, vypiš eventy na stdout, nic neposílej.
@@ -53,7 +53,7 @@
 
 ## Hardware — nové checky
 
-38. 🟡 Raspberry Pi: čtení `vcgencmd get_throttled` — detekce undervoltage a thermal throttlingu (na RPi důležitější než teplota sama).
+38. ✅ ~~Raspberry Pi vcgencmd get_throttled~~ — HOTOVO: `agent_rpi_power_monitor`, undervoltage NOW = CRITICAL, ostatní + historie od bootu = WARNING; auto-skip mimo RPi.
 39. 🟡 SMART: sledovat i reallocated/pending sektory (`Reallocated_Sector_Ct`, `Current_Pending_Sector`) — selhání předchází dřív než overall health FAILED.
 40. 🟢 Monitoring otáček ventilátorů z hwmon (kde existují).
 41. 🟢 SD karta na RPi: detekce read-only remountu filesystému (typická smrt SD karty).

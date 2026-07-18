@@ -22,7 +22,7 @@ The Sentinel Agent operates as a persistent, high-privilege background daemon wi
 |   +-------------------------------------------------------------------------------+   |
 |   |                        Sentinel Agent Monolithic Daemon                       |   |
 |   |   * Runs as Root User (Required for smartctl, dmesg, and privilege syscalls)  |   |
-|   |   * Executes 24 localized collection routines sequentially every X seconds    |   |
+|   |   * Executes 25 localized collection routines sequentially every X seconds    |   |
 |   +---------------------------------------+---------------------------------------+   |
 |                                           |                                           |
 |                                           v Discrete Status + Formatted String        |
@@ -182,7 +182,7 @@ Sent immediately if one or more sub-modules detect a state mutation during the s
 
 ## 4. Comprehensive Module Specification
 
-The monolithic agent execution block contains 24 built-in sub-modules. Each module operates on precise low-level parsing logic.
+The monolithic agent execution block contains 25 built-in sub-modules. Each module operates on precise low-level parsing logic.
 
 ### 1. `agent_services_monitor`
 *   **Mechanism:** Executes `systemctl is-active <service_name>`.
@@ -228,8 +228,8 @@ The monolithic agent execution block contains 24 built-in sub-modules. Each modu
 *   **Logic:** For NVMe drives, it extracts the `Percentage Used` metric and subtracts it from 100. For SATA drives, it parses attributes like `Media_Wearout_Indicator` or `Remaining_Lifetime_Perc`. If remaining life falls $\le 10\%$, it triggers a `CRITICAL` alert.
 
 ### 11. `agent_kernel_oom_monitor`
-*   **Mechanism:** Interrogates the active kernel ring logger buffer via `dmesg`.
-*   **Logic:** Uses regular expressions to match strings like `Out of memory: Kill process` or `Killed process`. It counts total occurrences and compares them against the startup baseline count. Any increase in the count triggers an immediate `CRITICAL` alert.
+*   **Mechanism:** Primary: reads the kernel journal incrementally via `journalctl -k --cursor-file`. The persistent cursor (stored next to the state file) guarantees each log line is examined exactly once — counting survives ring buffer rotation and agent restarts. Fallback for non-systemd hosts: `dmesg` occurrence count delta.
+*   **Logic:** Uses regular expressions to match `Out of memory: Kill process` (old kernels) and `Killed process ... total-vm` (new kernels). Any new kill event triggers an immediate `CRITICAL` alert with the exact count.
 
 ### 12. `agent_process_zombie_monitor`
 *   **Mechanism:** Scans the active process execution tree using `ps -eo state`.
@@ -291,6 +291,10 @@ The monolithic agent execution block contains 24 built-in sub-modules. Each modu
 *   **Mechanism:** Checks for the `/var/run/reboot-required` flag file (Debian/Ubuntu). Controlled by `security.check_system_updates`.
 *   **Logic:** An installed kernel or core library security patch is not effective until the machine restarts. If the flag exists, it triggers a `WARNING` listing the packages that requested the reboot (from `reboot-required.pkgs`).
 
+### 25. `agent_rpi_power_monitor`
+*   **Mechanism:** Queries the Raspberry Pi firmware via `vcgencmd get_throttled` and decodes the bitmask. Automatically skipped on non-RPi hardware (binary absent). Controlled by `hardware.monitor_rpi_throttling`.
+*   **Logic:** Bits 0–3 are active conditions, bits 16–19 are since-boot history. Active under-voltage (bit 0) triggers `CRITICAL` — it is the most common cause of mysterious RPi instability (bad PSU or cable). Frequency capping, active throttling, soft temperature limits, and all historical flags trigger `WARNING`. Historical flags persist until reboot, keeping an unstable power supply visible.
+
 ---
 
 ## 5. Configuration Schema Blueprint
@@ -350,6 +354,9 @@ checks:
     enabled: true
     warning: 75.0
     critical: 85.0
+
+  hardware:
+    monitor_rpi_throttling: true  # RPi undervoltage/throttling via vcgencmd (skipped elsewhere)
 
   storage:
     enabled: true
