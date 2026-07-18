@@ -46,6 +46,7 @@ LANG_DICT = {
         'api_url': "Zakladni URL adresa centralniho Sentinel serveru (vcetne portu).",
         'api_token': "Autentizacni token vygenerovany na serveru pro zabezpecenou komunikaci.",
         'api_host': "Unikatni jmeno tohoto serveru/uzlu pro identifikaci v dashboardu.",
+        'source_ip': "Zdrojova IP pro odchozi HTTP pozadavky (prazdne = automaticky). Pouzijte pri vice sítovych rozhranich (eth+wifi) pro zabraneni duplicitnich hlaseni.",
         'update_q': "Ma se agent sam automaticky aktualizovat z Gitu, kdyz detekuje zmenu (auto-refresh)?",
         'int_push': "Jak casto (v sekundach) se maji posilat data na server.",
         'int_boot': "Cas (v sekundach), po ktery agent po startu ceka na nabehnuti ostatnich sluzeb (zabranuje falesnym poplachum).",
@@ -61,19 +62,24 @@ LANG_DICT = {
         'systemd': "Globalne kontroluje, zda neselhala nejaka sluzba na pozadi (failed units).",
         'dns': "Testuje funkcnost prekladu domenovych jmen (zda funguje sitovy resolver).",
         'conn': "Sleduje vytizeni tabulky conntrack na firewallu, cimz predchazi zahazovani paketu.",
-        'root': "Spusti poplach pokazde, kdyz se nekdo prihlasi na server pod uctem root.",
+        'root': "Spusti poplach pokazde, kdyz se nekdo prihlasi na server pod uctem root (pouze SSH prihlaseni, tmux sessiony jsou ignorovany).",
+        'root_ignore_ips': "Zadejte IP adresy, ze kterych se root prihlaseni ignoruji (napr. 192.168.1.1).",
         'ports': "Vytvori snimek aktualne otevrenych portu a varuje, pokud se otevre novy (necekany) port.",
         'updates': "Dotazuje se balickovaciho systemu (apt/dnf) na cekajici systemove aktualizace.",
-        'cve': "Hleda vyslovene kriticke bezpecnostni zaplaty (CVE) v cekajicich aktualizacich.",
+        'cve': "Hleda kriticke bezpecnostni zaplaty (CVE) v cekajicich aktualizacich a porovnava verzi kernelu se znamymi privilege-escalation exploity (Dirty COW, Dirty Pipe, nf_tables...).",
         'f2b': "Analyzuje Fail2ban a upozorni, pokud probiha masivni brute-force utok (vysoky pocet banu).",
+        'suspicious': "Detekuje podezrele chovani: zmeny /etc/passwd|shadow|sudoers (stopa exploitu Dirty COW/Dirty Pipe), nove ucty s UID 0, procesy spustene z /tmp, known cryptominery, reverse-shell vzory a SUID binarky v docasnych adresarich.",
+        'mem': "Sleduje vyuziti RAM a swap pameti. Cte data z /proc/meminfo bez zavislosti na externích nastrojich.",
         'svc_q': "Chcete specifikovat konkretni systemd sluzby (treba nginx, docker), ktere maji byt hlidany?",
         'mnt_q': "Chcete specifikovat konkretni pripojne body (napr. /mnt/data), ktere musi byt pripojeny?",
-        'ssl_q': "Chcete nastavit hlidani exspirace pro konkretni SSL/TLS certifikaty?"
+        'ssl_q': "Chcete nastavit hlidani exspirace pro konkretni SSL/TLS certifikaty?",
+        'disk_health': "Spusti smartctl -H na kazdem fyzickem disku pro detekci bliziciho se selhani hardware. Automaticky preskoceno na virtualnim stroji (LXC, QEMU, KVM)."
     },
     'en': {
         'api_url': "Base URL address of the central Sentinel server (including port).",
         'api_token': "Authentication token generated on the server for secure communication.",
         'api_host': "Unique name of this server/node for dashboard identification.",
+        'source_ip': "Source IP for outgoing HTTP requests (empty = automatic). Use when device has multiple interfaces (eth+wifi) to prevent duplicate reports.",
         'update_q': "Should the agent automatically pull from Git when a change is detected (auto-refresh)?",
         'int_push': "How often (in seconds) to send telemetry data to the server.",
         'int_boot': "Time (in seconds) the agent waits after boot for other services to start (prevents false alerts).",
@@ -89,14 +95,18 @@ LANG_DICT = {
         'systemd': "Globally checks if any background service has failed (failed units).",
         'dns': "Tests the functionality of domain name resolution (network resolver health).",
         'conn': "Monitors firewall conntrack table utilization to prevent packet drops.",
-        'root': "Triggers an alert whenever someone logs into the server as the root user.",
+        'root': "Triggers an alert whenever someone logs into the server as the root user (SSH logins only, tmux sessions are ignored).",
+        'root_ignore_ips': "Enter IP addresses from which root logins are ignored (e.g., 192.168.1.1).",
         'ports': "Creates a snapshot of currently open ports and warns if a new (unexpected) port opens.",
         'updates': "Queries the package manager (apt/dnf) for pending system updates.",
-        'cve': "Looks specifically for critical security patches (CVE) in pending updates.",
+        'cve': "Looks for critical security patches (CVE) in pending updates and compares the kernel version against known privilege-escalation exploits (Dirty COW, Dirty Pipe, nf_tables...).",
         'f2b': "Analyzes Fail2ban and alerts if a massive brute-force attack is ongoing (high ban count).",
+        'suspicious': "Detects suspicious behavior: changes to /etc/passwd|shadow|sudoers (Dirty COW/Dirty Pipe exploit footprint), new UID 0 accounts, processes running from /tmp, known cryptominers, reverse-shell patterns and SUID binaries in temp dirs.",
+        'mem': "Monitors RAM and swap utilization. Reads /proc/meminfo with no external tool dependencies.",
         'svc_q': "Do you want to specify exact systemd services (e.g., nginx, docker) to be monitored?",
         'mnt_q': "Do you want to specify exact mountpoints (e.g., /mnt/data) that must remain attached?",
-        'ssl_q': "Do you want to set up expiration monitoring for specific SSL/TLS certificates?"
+        'ssl_q': "Do you want to set up expiration monitoring for specific SSL/TLS certificates?",
+        'disk_health': "Runs smartctl -H on each physical drive to detect imminent hardware failure. Automatically skipped on virtual machines (LXC, QEMU, KVM)."
     }
 }
 
@@ -136,12 +146,14 @@ def prompt_bool(message, default_bool, explanation=None):
 def load_existing_config():
     default_config = {
         "agent_core": {
-            "git_auto_update": False
+            "git_auto_update": False,
+            "state_file": "/var/lib/sentinel/state.json"
         },
         "sentinel_api": {
             "url": "http://192.168.1.100:5050",
             "token": "",
-            "hostname": socket.gethostname()
+            "hostname": socket.gethostname(),
+            "source_ip": ""
         },
         "intervals": {
             "metrics_push_sec": 60,
@@ -152,11 +164,12 @@ def load_existing_config():
             "services": [],
             "mounts": [],
             "temperature": {"enabled": True, "warning": 75.0, "critical": 85.0},
-            "storage": {"enabled": True, "paths": ["/"], "warn_percent": 85, "crit_percent": 95, "monitor_wearout": True, "monitor_raid": True},
+            "storage": {"enabled": True, "paths": ["/"], "warn_percent": 85, "crit_percent": 95, "monitor_wearout": True, "monitor_raid": True, "monitor_disk_health": False},
+            "memory": {"enabled": True, "warn_percent": 85, "crit_percent": 95, "monitor_swap": True},
             "kernel": {"monitor_oom": True, "monitor_zombies": True, "max_zombies": 5, "monitor_io_hangs": True, "monitor_taint": True},
             "system": {"monitor_time_sync": True, "monitor_global_systemd": True},
             "network": {"monitor_dns": True, "monitor_conntrack": True},
-            "security": {"monitor_root_logins": True, "monitor_ports": True, "check_system_updates": True, "scan_cves": True, "fail2ban_stats": True, "ssl_certs": []}
+            "security": {"monitor_root_logins": True, "root_login_ignore_ips": [], "monitor_ports": True, "check_system_updates": True, "scan_cves": True, "fail2ban_stats": True, "monitor_suspicious": True, "ssl_certs": []}
         }
     }
 
@@ -258,6 +271,22 @@ def configure_ssl_certs(current_certs):
             if path in modified_certs: modified_certs.remove(path)
     return modified_certs
 
+def configure_root_ignore_ips(current_ips):
+    print(f"\n{C_CYAN}--- Root Login IP Whitelist ---{C_END}")
+    modified_ips = list(current_ips)
+    while True:
+        print(f"\nCurrent whitelisted IPs: {modified_ips if modified_ips else '(None)'}")
+        choice = input(f"Options: [{C_GREEN}a{C_END}]dd IP, [{C_GREEN}d{C_END}]elete IP, [{C_GREEN}n{C_END}]ext step: ").strip().lower()
+        if choice == 'n' or not choice: break
+        elif choice == 'a':
+            ip = input("Enter IP address to whitelist: ").strip()
+            if ip and ip not in modified_ips: modified_ips.append(ip)
+        elif choice == 'd':
+            ip = input("Enter exact IP to remove: ").strip()
+            if ip in modified_ips: modified_ips.remove(ip)
+    return modified_ips
+
+
 def setup_agent_venv(working_dir):
     """
     Creates an isolated Python virtual environment for the Sentinel Agent
@@ -285,6 +314,60 @@ def setup_agent_venv(working_dir):
         sys.exit(1)
 
     return python_bin
+
+AGENT_ISSUES_SCRIPT = """\
+#!/usr/bin/env python3
+import os, sys, json
+
+CONFIG_FILE = "/etc/sentinel/agent_config.yaml"
+
+try:
+    import yaml
+except ImportError:
+    print("[!] PyYAML missing. Run: apt install python3-yaml")
+    sys.exit(1)
+
+if not os.path.exists(CONFIG_FILE):
+    print(f"[!] Config not found: {CONFIG_FILE}")
+    sys.exit(1)
+
+with open(CONFIG_FILE, 'r') as f:
+    config = yaml.safe_load(f)
+
+state_file = config.get('agent_core', {}).get('state_file', '/var/lib/sentinel/state.json')
+
+if not os.path.exists(state_file):
+    print(f"No state file at {state_file}. Is sentinel-agent running?")
+    sys.exit(0)
+
+with open(state_file, 'r') as f:
+    state = json.load(f)
+
+issues = state.get('issues', {})
+hostname = state.get('hostname', 'unknown')
+updated = state.get('updated', 'unknown')
+
+print(f"Active issues on {hostname}  (last update: {updated})")
+print("-" * 60)
+if not issues:
+    print("  No active issues.")
+else:
+    for _, issue in sorted(issues.items()):
+        print(f"  [{issue['status']}] {issue['target']} ({issue['plugin']})")
+        print(f"    {issue['message']}")
+        print()
+"""
+
+def _install_agent_issues_binary():
+    binary_path = "/usr/local/bin/agent_issues"
+    try:
+        with open(binary_path, 'w') as f:
+            f.write(AGENT_ISSUES_SCRIPT)
+        os.chmod(binary_path, 0o755)
+        print(f"{C_GREEN}[+] Installed system binary: {binary_path}{C_END}")
+    except Exception as e:
+        print(f"{C_WARN}[!] Could not install {binary_path}: {e}{C_END}")
+
 
 def manage_systemd_service():
     print(f"\n{C_GREEN}[Step 6] Systemd Service Deployment & Management{C_END}")
@@ -324,6 +407,8 @@ WantedBy=multi-user.target
                 print(f"{C_FAIL}[!] Failed to create service: {e}{C_END}")
                 return
 
+    _install_agent_issues_binary()
+
     while True:
         print(f"\n{C_CYAN}--- Sentinel Agent Service Control ---{C_END}")
         choice = input(f"Options: [{C_GREEN}s{C_END}]tart, [{C_GREEN}r{C_END}]estart, [{C_GREEN}e{C_END}]nable, [{C_GREEN}q{C_END}]uit: ").strip().lower()
@@ -347,6 +432,7 @@ def main(lang):
     cfg["sentinel_api"]["url"] = prompt_input("Sentinel Server API Central URL Base", cfg["sentinel_api"]["url"], txt['api_url'])
     cfg["sentinel_api"]["token"] = prompt_input("Secure Agent API Token Authentication Key", cfg["sentinel_api"]["token"], txt['api_token'])
     cfg["sentinel_api"]["hostname"] = prompt_input("Report Identity (Cluster Node Hostname)", cfg["sentinel_api"]["hostname"], txt['api_host'])
+    cfg["sentinel_api"]["source_ip"] = prompt_input("Source IP for outgoing requests (leave empty for automatic)", cfg["sentinel_api"].get("source_ip", ""), txt['source_ip'])
 
     print(f"\n{C_GREEN}[Step 2] Agent Core Features{C_END}")
     cfg["agent_core"]["git_auto_update"] = prompt_bool("Enable Autonomous Git Auto-Update (auto-refresh)", cfg["agent_core"].get("git_auto_update", False), txt['update_q'])
@@ -370,6 +456,13 @@ def main(lang):
     
     cfg["checks"]["storage"]["monitor_wearout"] = prompt_bool("Monitor SSD NVMe/SATA wearout (SMART attributes)", cfg["checks"]["storage"].get("monitor_wearout", True), txt['wearout'])
     cfg["checks"]["storage"]["monitor_raid"] = prompt_bool("Monitor software RAID (mdadm) array health", cfg["checks"]["storage"].get("monitor_raid", True), txt['raid'])
+    cfg["checks"]["storage"]["monitor_disk_health"] = prompt_bool("Monitor physical disk SMART overall health (skip on VM/LXC)", cfg["checks"]["storage"].get("monitor_disk_health", False), txt.get('disk_health', 'Runs smartctl -H on each physical drive to detect imminent hardware failure. Skipped automatically on virtual machines.'))
+
+    cfg["checks"]["memory"]["enabled"] = prompt_bool("Monitor RAM and swap memory utilization", cfg["checks"]["memory"].get("enabled", True), txt['mem'])
+    if cfg["checks"]["memory"]["enabled"]:
+        cfg["checks"]["memory"]["warn_percent"] = int(prompt_input("RAM/Swap WARNING limit (%)", cfg["checks"]["memory"].get("warn_percent", 85)))
+        cfg["checks"]["memory"]["crit_percent"] = int(prompt_input("RAM/Swap CRITICAL limit (%)", cfg["checks"]["memory"].get("crit_percent", 95)))
+        cfg["checks"]["memory"]["monitor_swap"] = prompt_bool("Also monitor swap utilization", cfg["checks"]["memory"].get("monitor_swap", True))
 
     cfg["checks"]["kernel"]["monitor_oom"] = prompt_bool("Monitor Kernel Out-Of-Memory (OOM) killer terminations", cfg["checks"]["kernel"].get("monitor_oom", True), txt['oom'])
     cfg["checks"]["kernel"]["monitor_zombies"] = prompt_bool("Monitor defective zombie (defunct) processes", cfg["checks"]["kernel"].get("monitor_zombies", True), txt['zombie'])
@@ -398,10 +491,13 @@ def main(lang):
     
     print(f"\n{C_GREEN}[Step 6] Operating System Security Profiling Framework Controls{C_END}")
     cfg["checks"]["security"]["monitor_root_logins"] = prompt_bool("Monitor active root session terminal access timelines", cfg["checks"]["security"].get("monitor_root_logins", True), txt['root'])
+    if cfg["checks"]["security"]["monitor_root_logins"]:
+        cfg["checks"]["security"]["root_login_ignore_ips"] = configure_root_ignore_ips(cfg["checks"]["security"].get("root_login_ignore_ips", []))
     cfg["checks"]["security"]["monitor_ports"] = prompt_bool("Monitor network sockets bindings drift against baseline", cfg["checks"]["security"].get("monitor_ports", True), txt['ports'])
     cfg["checks"]["security"]["check_system_updates"] = prompt_bool("Monitor pending OS software upgrades", cfg["checks"]["security"].get("check_system_updates", True), txt['updates'])
     cfg["checks"]["security"]["scan_cves"] = prompt_bool("Monitor package level vulnerability lookup (CVE)", cfg["checks"]["security"].get("scan_cves", True), txt['cve'])
     cfg["checks"]["security"]["fail2ban_stats"] = prompt_bool("Monitor security blocking counts from local Fail2ban", cfg["checks"]["security"].get("fail2ban_stats", True), txt['f2b'])
+    cfg["checks"]["security"]["monitor_suspicious"] = prompt_bool("Monitor suspicious processes & exploit footprints (CVE abuse)", cfg["checks"]["security"].get("monitor_suspicious", True), txt['suspicious'])
     
     if prompt_bool("Do you want to configure SSL/TLS Certificate Expiration Watcher?", True, txt['ssl_q']):
         cfg["checks"]["security"]["ssl_certs"] = configure_ssl_certs(cfg["checks"]["security"].get("ssl_certs", []))

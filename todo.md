@@ -1,0 +1,74 @@
+# Sentinel Agent — TODO / Návrhy na vylepšení
+
+50 návrhů seřazených podle kategorií. Priorita: 🔴 vysoká, 🟡 střední, 🟢 nízká.
+
+## Bezpečnost — detekce (navazuje na nový check_suspicious_activity)
+
+1. ✅ ~~Detekce nových SSH authorized_keys~~ — HOTOVO: baseline hash root + /home/* v `check_suspicious_activity` (persistence_files).
+2. ✅ ~~Monitoring nových cronů~~ — HOTOVO: /etc/crontab, /etc/cron.d, /var/spool/cron v persistence_files baseline. Zbývá: systemd timery.
+3. 🔴 Detekce procesů se smazaným binárním souborem (`/proc/PID/exe` → `(deleted)`) běžících z temp cest — miner se často po spuštění smaže.
+4. ✅ ~~Kontrola `LD_PRELOAD` a `/etc/ld.so.preload`~~ — HOTOVO: CRITICAL při neprázdném /etc/ld.so.preload.
+5. 🟡 Baseline SUID/SGID binárek v celém systému (ne jen temp dirs) — alert na nově přibyvší SUID soubor.
+6. 🟡 Detekce promiskuitního režimu síťových rozhraní (sniffing) — flag IFF_PROMISC z `/sys/class/net/*/flags`.
+7. 🟡 Kontrola podezřelých odchozích spojení — spojení na známé miner pooly / neobvyklé porty (4444, 1337, stratum+tcp).
+8. 🟡 Monitoring selhání sudo/su pokusů z journalu (`journalctl _COMM=sudo`) — burst selhání = pokus o eskalaci.
+9. 🟡 Detekce nově přidaných uživatelů do skupin sudo/wheel/docker (docker skupina = root ekvivalent).
+10. 🟡 Kontrola kernel modulů proti baseline (`lsmod`) — nový neznámý modul může být rootkit.
+11. 🟡 Rozšířit reverse-shell vzory o perl/php/ruby one-linery a msfvenom stopy.
+12. 🟢 Kontrola immutable flagu na kritických souborech — útočník si někdy nastaví `chattr +i` na svůj backdoor.
+13. 🟢 Detekce procesů s otevřeným raw socketem (možný backdoor/scanner) přes `/proc/net/raw`.
+14. 🟢 Whitelist pro suspicious-process check (config `suspicious_ignore`) — např. legitimní skript v /tmp u CI runneru, omezení false positives.
+15. 🟢 Volitelná integrace `debsums`/`rpm -V` pro ověření integrity systémových balíků (týdenní cadence).
+
+## Bezpečnost — CVE / aktualizace
+
+16. ✅ ~~Vypsat konkrétní CVE/balíky v hlášení o security updatech~~ — HOTOVO: prvních 10 balíků v CRITICAL hlášce (apt i dnf).
+17. ✅ ~~Kontrola verze kernelu proti známým lokálním eskalacím~~ — HOTOVO: `check_kernel_cves` (Dirty COW, OverlayFS, Dirty Pipe, nf_tables UAF). Rozšiřovat tabulku KERNEL_LPE_CVES o nové CVE.
+18. ✅ ~~Alert na pending reboot~~ — HOTOVO: /var/run/reboot-required + výpis balíků, které ho vyvolaly.
+19. 🟢 Podpora `needrestart` — detekce služeb běžících se starými (opatchovanými) knihovnami.
+20. 🟢 Volitelný `unattended-upgrades` status check — hlásit, když automatické security aktualizace selhávají.
+
+## Spolehlivost agenta
+
+21. 🔴 Persistovat `last_reported_states` a baselines (ports, critical_files) do state souboru — po restartu agenta se teď ztratí a přeposílají se OK/duplicity.
+22. 🔴 Retry/backoff fronta pro push_to_sentinel — při výpadku serveru se eventy zahodí; ukládat do bufferu a odeslat po obnovení.
+23. 🔴 Git auto-update: ověřit, že nový kód projde `py_compile` PŘED restartem — jinak si agent stáhne rozbitý kód a už nenastartuje.
+24. 🟡 Timeout u všech subprocess.run volání (smartctl umí viset na vadném disku — teď zablokuje celý cyklus).
+25. 🟡 Watchdog integrace se systemd (`WatchdogSec` + `sd_notify`) — detekce zamrzlého agenta.
+26. 🟡 Hlídat vlastní paměť/CPU agenta a self-restart při překročení limitu.
+27. 🟡 dmesg čtení: použít `dmesg --since` nebo journal kursor místo full-scan + regex countu (ring buffer se přetáčí → OOM count je nespolehlivý).
+28. 🟢 Config reload na SIGHUP bez restartu služby.
+29. 🟢 Validace config schématu při startu (chybějící klíč → srozumitelná chyba místo KeyError).
+30. 🟢 `--dry-run` režim: proveď všechny checky, vypiš eventy na stdout, nic neposílej.
+
+## Síť / infrastruktura — nové checky
+
+31. 🟡 Ping/latence check na definované cíle (gateway, internet) — detekce degradace sítě.
+32. 🟡 Monitoring šířky pásma rozhraní — alert na saturaci nebo anomální odchozí tok (exfiltrace/miner).
+33. 🟡 HTTP(S) health check definovaných URL (interní služby) — status kód + latence.
+34. 🟡 Kontrola DHCP vs statické IP — alert když se změní IP adresa uzlu.
+35. 🟢 Monitoring UPS přes NUT (`upsc`) — stav baterie, on-battery events.
+36. 🟢 Kontrola dostupnosti default gateway (arping) — detekce L2 problémů.
+37. 🟢 mDNS/avahi konflikt detekce (duplicitní hostname na síti).
+
+## Hardware — nové checky
+
+38. 🟡 Raspberry Pi: čtení `vcgencmd get_throttled` — detekce undervoltage a thermal throttlingu (na RPi důležitější než teplota sama).
+39. 🟡 SMART: sledovat i reallocated/pending sektory (`Reallocated_Sector_Ct`, `Current_Pending_Sector`) — selhání předchází dřív než overall health FAILED.
+40. 🟢 Monitoring otáček ventilátorů z hwmon (kde existují).
+41. 🟢 SD karta na RPi: detekce read-only remountu filesystému (typická smrt SD karty).
+
+## Server / protokol
+
+42. 🟡 Agent → server: posílat i verzi agenta (git SHA) v payloadu — server uvidí, kdo běží na staré verzi.
+43. 🟡 HTTPS + ověření certifikátu pro komunikaci se serverem (teď plaintext HTTP token).
+44. 🟡 Komprese payloadu / batching při velkém počtu eventů.
+45. 🟢 Endpoint `/api/v1/agent/config` — centrální distribuce konfigurace z Ansible/serveru místo ruční editace na každém uzlu.
+
+## Kód / údržba
+
+46. 🟡 Rozdělit checky do plugin modulů (checks/*.py) — sentinel_agent.py má 1300+ řádků a poroste; registry pattern místo ručního seznamu v run_loop.
+47. 🟡 Unit testy pro parsovací logiku (who, smartctl, meminfo, revshell regexy) — pytest, fixture s reálnými výstupy.
+48. 🟢 Sjednotit stylizované hlášky („matrix", „structural") — volitelně plain-english režim pro čitelnost.
+49. 🟢 requirements.txt + pin verzí pro venv (teď se instaluje latest requests/pyyaml).
+50. 🟢 CI na Gitea (actions): py_compile + testy na push — ochrana před rozbitím git auto-update mechanismu (souvisí s #23).

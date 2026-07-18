@@ -21,12 +21,15 @@ import socket
 import subprocess
 import argparse
 import re
+import json
+import hashlib
 import datetime
 from datetime import datetime, timezone
 
 # --- Dynamic Dependency Checks ---
 try:
     import requests
+    from requests.adapters import HTTPAdapter
 except ImportError:
     print("[!] Missing critical dependency 'requests'. Execution aborted.", flush=True)
     sys.exit(1)
@@ -39,6 +42,17 @@ except ImportError:
 
 # Central configuration path
 CONFIG_FILE = "/etc/sentinel/agent_config.yaml"
+
+
+class SourceAddressAdapter(HTTPAdapter):
+    """Binds outgoing HTTP requests to a specific local IP address."""
+    def __init__(self, source_address, **kwargs):
+        self.source_address = source_address
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs['source_address'] = (self.source_address, 0)
+        super().init_poolmanager(*args, **kwargs)
 
 class SentinelAgent:
     def __init__(self, fast_mode=False):
@@ -62,7 +76,8 @@ class SentinelAgent:
         }
         
         self.os_family = self._detect_os_family()
-        
+        self.is_virtual = self._is_virtual_environment()
+
         # --- Stateful Tracking Memory ---
         self.last_reported_states = {}
         self.last_oom_count = 0
@@ -72,11 +87,43 @@ class SentinelAgent:
         self.baseline_ports = set()
         self.ports_initialized = False
 
+        # --- Active Issue Registry & Service Flap Tracking ---
+        self.active_issues = {}
+        self.flap_counts = {}
+
+        # --- Suspicious Activity Baselines (critical file integrity) ---
+        self.critical_file_hashes = {}
+        self.critical_files_initialized = False
+
+        # --- Persistence Files Baseline (authorized_keys, cron) ---
+        self.persistence_file_hashes = {}
+        self.persistence_files_initialized = False
+        self.state_file = self.config.get('agent_core', {}).get('state_file', '/var/lib/sentinel/state.json')
+
+        # --- HTTP Session (optional source IP binding to prevent multi-IP duplicates) ---
+        self.session = requests.Session()
+        source_ip = self.config.get('sentinel_api', {}).get('source_ip', '').strip()
+        if source_ip:
+            adapter = SourceAddressAdapter(source_ip)
+            self.session.mount('http://', adapter)
+            self.session.mount('https://', adapter)
+
     def _detect_os_family(self):
         """Heuristically detects the underlying Linux distribution family."""
         if os.path.exists("/etc/debian_version"): return "debian"
         elif os.path.exists("/etc/redhat-release") or os.path.exists("/etc/centos-release"): return "rhel"
         return "generic"
+
+    def _is_virtual_environment(self):
+        """Returns True if running inside a VM or container (LXC, QEMU, KVM, etc.)."""
+        try:
+            result = subprocess.run(
+                ["systemd-detect-virt"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+            )
+            return result.stdout.strip() != "none"
+        except Exception:
+            return False
 
     def _get_cpu_temperature(self):
         """Reads the CPU temperature from system thermal zones (compatible with Pi and Ubuntu)."""
@@ -164,20 +211,29 @@ class SentinelAgent:
         if not services:
             return events
         
+        confirm_threshold = self.config.get('checks', {}).get('service_confirm_count', 2)
         for svc in services:
             name = svc['name']
             severity = svc.get('severity', 'CRITICAL').upper()
             state_key = f"service:{name}"
-            
+
             result = subprocess.run(
                 ["systemctl", "is-active", name],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
             state = result.stdout.strip()
             current_status = severity if state not in ["active", "inactive"] else "OK"
-            
+
+            svc_threshold = svc.get('confirm_count', confirm_threshold)
+            if current_status != "OK":
+                self.flap_counts[state_key] = self.flap_counts.get(state_key, 0) + 1
+                if self.flap_counts[state_key] < svc_threshold:
+                    continue
+            else:
+                self.flap_counts[state_key] = 0
+
             msg = f"Systemd service '{name}' shifted to unexpected state: {state}." if current_status != "OK" else f"Service '{name}' is back to normal configuration matrix."
-            
+
             if self.should_report(state_key, msg):
                 events.append({
                     "plugin": "agent_services_monitor",
@@ -246,10 +302,12 @@ class SentinelAgent:
             return events
 
         unassigned_ports = current_ports - self.baseline_ports
-        current_status = "WARNING" if unassigned_ports else "OK"
-        
+        # UDP ports are expected (DNS, NTP, mDNS, etc.) — only flag new TCP ports
+        suspicious = sorted(p for p in unassigned_ports if p.startswith('tcp:'))
+        current_status = "WARNING" if suspicious else "OK"
+
         if current_status == "WARNING":
-            msg = f"Security Alert! Unregistered listening ports identified after initialization: {sorted(list(unassigned_ports))}"
+            msg = f"Security Alert! Unregistered listening ports identified after initialization: {suspicious}"
         else:
             msg = "Network architecture returned back to trusted baseline configurations matrix."
             
@@ -269,17 +327,30 @@ class SentinelAgent:
         # --- 1. Real-time Root Logins Tracking ---
         if sec_config.get('monitor_root_logins', False):
             state_key = "security:root_logins"
+            ignore_ips = sec_config.get('root_login_ignore_ips', [])
             try:
                 who_proc = subprocess.run(["who"], stdout=subprocess.PIPE, text=True)
                 root_sessions = []
                 for line in who_proc.stdout.splitlines():
                     if line.startswith("root"):
                         parts = line.split()
-                        if len(parts) >= 4:
-                            tty = parts[1]
-                            time_str = f"{parts[2]} {parts[3]}"
-                            ip = parts[4].strip("()") if len(parts) >= 5 else "localhost"
-                            root_sessions.append(f"🟢 [ACTIVE] {tty} from {ip} (since {time_str})")
+                        if len(parts) < 4:
+                            continue
+                        tty = parts[1]
+                        # IP is always in parentheses — extract by regex regardless of column count
+                        ip_match = re.search(r'\(([^)]+)\)', line)
+                        if not ip_match:
+                            continue
+                        ip = ip_match.group(1)
+                        # Skip non-SSH sessions (no valid IP/hostname in parentheses)
+                        if not re.match(r'^\d+\.\d+\.\d+\.\d+$', ip) and ':' not in ip:
+                            continue
+                        # time_str: everything between tty and the parenthesised IP
+                        time_str = line[line.index(tty) + len(tty):line.index('(')].strip()
+                        # Skip whitelisted IPs
+                        if ip in ignore_ips:
+                            continue
+                        root_sessions.append(f"🟢 [ACTIVE] {tty} from {ip} (since {time_str})")
 
                 current_status = "WARNING" if root_sessions else "OK"
                 msg = " | ".join(root_sessions) if current_status == "WARNING" else "Root access session cleared. Normal state restored."
@@ -298,23 +369,29 @@ class SentinelAgent:
         if sec_config.get('check_system_updates', False) or sec_config.get('scan_cves', False):
             state_key = "security:vulnerabilities"
             update_count, sec_update_count = 0, 0
+            sec_packages = []
             try:
                 if self.os_family == "debian":
                     apt_proc = subprocess.run(["apt-get", "-s", "upgrade"], stdout=subprocess.PIPE, text=True)
                     upgrade_lines = [l for l in apt_proc.stdout.splitlines() if l.startswith("Inst ")]
                     update_count = len(upgrade_lines)
-                    sec_update_count = len([l for l in upgrade_lines if "security" in l.lower() or "cve" in l.lower()])
+                    sec_lines = [l for l in upgrade_lines if "security" in l.lower() or "cve" in l.lower()]
+                    sec_update_count = len(sec_lines)
+                    sec_packages = [l.split()[1] for l in sec_lines if len(l.split()) > 1]
                 elif self.os_family == "rhel":
                     dnf_proc = subprocess.run(["dnf", "check-update", "--security"], stdout=subprocess.PIPE, text=True)
                     if dnf_proc.returncode == 100:
-                        sec_update_count = len([l for l in dnf_proc.stdout.splitlines() if l.strip()])
+                        sec_lines = [l for l in dnf_proc.stdout.splitlines() if l.strip() and not l.startswith(('Last metadata', 'Obsoleting'))]
+                        sec_update_count = len(sec_lines)
+                        sec_packages = [l.split()[0] for l in sec_lines if l.split()]
                     dnf_all = subprocess.run(["dnf", "check-update"], stdout=subprocess.PIPE, text=True)
                     if dnf_all.returncode == 100:
                         update_count = len([l for l in dnf_all.stdout.splitlines() if l.strip()])
 
                 current_status = "CRITICAL" if sec_update_count > 0 else ("WARNING" if update_count > 20 else "OK")
                 if current_status == "CRITICAL":
-                    msg = f"System is vulnerable! Found {sec_update_count} unpatched security updates/CVE vectors."
+                    pkg_list = ", ".join(sec_packages[:10]) + ("..." if len(sec_packages) > 10 else "")
+                    msg = f"System is vulnerable! Found {sec_update_count} unpatched security updates/CVE vectors. Affected: {pkg_list}"
                 elif current_status == "WARNING":
                     msg = f"System software array is drifting out of date. Found {update_count} pending updates."
                 else:
@@ -328,6 +405,33 @@ class SentinelAgent:
                         "message": msg
                     })
             except Exception: pass
+
+        # --- 2b. Pending Reboot (installed kernel/libc patch not effective yet) ---
+        if sec_config.get('check_system_updates', False):
+            state_key = "security:reboot_required"
+            reboot_flag = "/var/run/reboot-required"
+            pending = os.path.exists(reboot_flag)
+            if pending:
+                pkgs = ""
+                try:
+                    with open("/var/run/reboot-required.pkgs", 'r') as f:
+                        pkg_names = sorted(set(l.strip() for l in f if l.strip()))
+                        pkgs = f" Triggered by: {', '.join(pkg_names[:10])}."
+                except Exception:
+                    pass
+                current_status = "WARNING"
+                msg = f"Reboot required! Installed security patches (kernel/libraries) are not effective until restart.{pkgs}"
+            else:
+                current_status = "OK"
+                msg = "No pending reboot. All installed patches are active."
+
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_reboot_required",
+                    "target": "reboot",
+                    "status": current_status,
+                    "message": msg
+                })
 
         # --- 3. Fail2ban Brute-Force Pressure Statistics ---
         if sec_config.get('fail2ban_stats', False):
@@ -355,6 +459,269 @@ class SentinelAgent:
                                 "message": msg
                             })
             except Exception: pass
+
+        return events
+
+    # Critical files whose unexpected change signals privilege-escalation abuse
+    # (Dirty COW / Dirty Pipe exploits typically rewrite /etc/passwd or sudoers).
+    CRITICAL_FILES = ["/etc/passwd", "/etc/shadow", "/etc/sudoers"]
+    TMP_EXEC_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
+    MINER_NAMES = {"xmrig", "xmr-stak", "minerd", "cpuminer", "kinsing", "kdevtmpfsi"}
+    REVSHELL_PATTERNS = [
+        r"/dev/tcp/\d",
+        r"\bnc(at)?\b.*\s-e\s",
+        r"\bsocat\b.*\bexec\b",
+        r"pty\.spawn",
+        r"\bsh -i\b.*\d+\.\d+\.\d+\.\d+",
+    ]
+
+    # Well-known local privilege escalation kernel CVEs actively abused in the wild.
+    # Format: (cve_id, nickname, [(first_affected_incl, fixed_in_excl), ...]).
+    # Distro kernels backport fixes without bumping upstream version, hence WARNING
+    # severity with a "verify backport" note instead of CRITICAL.
+    KERNEL_LPE_CVES = [
+        ("CVE-2016-5195", "Dirty COW", [((2, 6, 22), (4, 4, 26)), ((4, 5, 0), (4, 7, 9)), ((4, 8, 0), (4, 8, 3))]),
+        ("CVE-2021-3493", "OverlayFS cap abuse (Ubuntu)", [((3, 13, 0), (5, 11, 0))]),
+        ("CVE-2022-0847", "Dirty Pipe", [((5, 8, 0), (5, 10, 102)), ((5, 11, 0), (5, 15, 25)), ((5, 16, 0), (5, 16, 11))]),
+        ("CVE-2024-1086", "nf_tables UAF", [((3, 15, 0), (6, 1, 76)), ((6, 2, 0), (6, 6, 15)), ((6, 7, 0), (6, 7, 3))]),
+    ]
+
+    def _kernel_version(self):
+        """Returns the running kernel version as a (major, minor, patch) tuple, or None."""
+        match = re.match(r'^(\d+)\.(\d+)\.(\d+)', os.uname().release)
+        if not match:
+            return None
+        return tuple(int(g) for g in match.groups())
+
+    def check_kernel_cves(self):
+        """Compares the running kernel version against known local privilege
+        escalation CVE ranges (Dirty COW, Dirty Pipe, ...)."""
+        events = []
+        if not self.config.get('checks', {}).get('security', {}).get('scan_cves', False):
+            return events
+
+        kver = self._kernel_version()
+        if kver is None:
+            return events
+
+        hits = []
+        for cve_id, nickname, ranges in self.KERNEL_LPE_CVES:
+            if any(lo <= kver < hi for lo, hi in ranges):
+                hits.append(f"{cve_id} ({nickname})")
+
+        state_key = "security:kernel_lpe_cves"
+        release = os.uname().release
+        if hits:
+            current_status = "WARNING"
+            msg = (f"Kernel {release} version falls into known privilege-escalation CVE ranges: "
+                   f"{', '.join(hits)}. Verify your distribution backported the fixes, or update/reboot the kernel.")
+        else:
+            current_status = "OK"
+            msg = f"Kernel {release} is outside known local privilege-escalation CVE ranges."
+
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_security_kernel_cve",
+                "target": "kernel",
+                "status": current_status,
+                "message": msg
+            })
+        return events
+
+    def _hash_file(self, path):
+        try:
+            with open(path, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except Exception:
+            return None
+
+    def _collect_persistence_files(self):
+        """Returns paths of files attackers modify for post-exploit persistence:
+        SSH authorized_keys (root + users) and cron entries."""
+        paths = ["/root/.ssh/authorized_keys", "/etc/crontab"]
+        try:
+            for home in os.listdir('/home'):
+                paths.append(f"/home/{home}/.ssh/authorized_keys")
+        except Exception:
+            pass
+        for cron_dir in ("/etc/cron.d", "/var/spool/cron/crontabs", "/var/spool/cron"):
+            try:
+                for entry in os.listdir(cron_dir):
+                    full = os.path.join(cron_dir, entry)
+                    if os.path.isfile(full):
+                        paths.append(full)
+            except Exception:
+                continue
+        return [p for p in paths if os.path.exists(p)]
+
+    def _scan_suspicious_processes(self):
+        """Walks /proc for processes executing from tmp dirs, known miners and reverse-shell patterns."""
+        findings = []
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit() or int(pid) == os.getpid():
+                continue
+            base = f"/proc/{pid}"
+            try:
+                with open(f"{base}/comm", 'r') as f:
+                    comm = f.read().strip()
+                with open(f"{base}/cmdline", 'rb') as f:
+                    cmdline = f.read().replace(b'\x00', b' ').decode(errors='replace').strip()
+            except Exception:
+                continue  # process vanished mid-scan
+            try:
+                exe = os.readlink(f"{base}/exe")
+            except Exception:
+                exe = ""
+
+            if exe.startswith(self.TMP_EXEC_DIRS):
+                findings.append(f"'{comm}' (PID {pid}) executing from temp dir: {exe}")
+            elif comm in self.MINER_NAMES:
+                findings.append(f"known cryptominer process '{comm}' (PID {pid})")
+            elif cmdline and any(re.search(p, cmdline) for p in self.REVSHELL_PATTERNS):
+                findings.append(f"reverse-shell pattern in '{comm}' (PID {pid}): {cmdline[:100]}")
+        return findings
+
+    def check_suspicious_activity(self):
+        """Detects suspicious user behavior and processes: critical file tampering
+        (Dirty COW/Dirty Pipe footprint), rogue UID 0 accounts, processes running
+        from temp dirs / miners / reverse shells, and SUID binaries in temp dirs."""
+        events = []
+        if not self.config.get('checks', {}).get('security', {}).get('monitor_suspicious', False):
+            return events
+
+        # --- 1. Critical file integrity (event-style, like OOM) ---
+        current_hashes = {p: self._hash_file(p) for p in self.CRITICAL_FILES}
+        if not self.critical_files_initialized:
+            self.critical_file_hashes = current_hashes
+            self.critical_files_initialized = True
+        else:
+            changed = [p for p in self.CRITICAL_FILES
+                       if current_hashes.get(p) != self.critical_file_hashes.get(p)]
+            state_key = "security:critical_files"
+            if changed:
+                msg = f"Integrity Alert! Critical auth files modified since baseline: {', '.join(changed)}. Verify this was a legitimate admin change (Dirty COW/Dirty Pipe exploits rewrite these files)."
+                self.critical_file_hashes = current_hashes
+                self.last_reported_states[state_key] = msg
+                events.append({
+                    "plugin": "agent_security_suspicious_activity",
+                    "target": "critical_files",
+                    "status": "CRITICAL",
+                    "message": msg
+                })
+            else:
+                msg = "Critical auth file integrity matches trusted baseline."
+                if self.should_report(state_key, msg):
+                    events.append({
+                        "plugin": "agent_security_suspicious_activity",
+                        "target": "critical_files",
+                        "status": "OK",
+                        "message": msg
+                    })
+
+        # --- 1b. Persistence file integrity: authorized_keys + cron (event-style) ---
+        persist_hashes = {p: self._hash_file(p) for p in self._collect_persistence_files()}
+        if not self.persistence_files_initialized:
+            self.persistence_file_hashes = persist_hashes
+            self.persistence_files_initialized = True
+        else:
+            changed = [p for p in set(persist_hashes) | set(self.persistence_file_hashes)
+                       if persist_hashes.get(p) != self.persistence_file_hashes.get(p)]
+            state_key = "security:persistence_files"
+            if changed:
+                msg = f"Persistence Alert! SSH keys / cron entries changed since baseline: {', '.join(sorted(changed))}. Attackers plant these after CVE exploitation - verify this was a legitimate admin change."
+                self.persistence_file_hashes = persist_hashes
+                self.last_reported_states[state_key] = msg
+                events.append({
+                    "plugin": "agent_security_suspicious_activity",
+                    "target": "persistence_files",
+                    "status": "CRITICAL",
+                    "message": msg
+                })
+            else:
+                msg = "SSH authorized_keys and cron entries match trusted baseline."
+                if self.should_report(state_key, msg):
+                    events.append({
+                        "plugin": "agent_security_suspicious_activity",
+                        "target": "persistence_files",
+                        "status": "OK",
+                        "message": msg
+                    })
+
+        # --- 1c. LD_PRELOAD rootkit hook (persistent condition) ---
+        try:
+            preload_content = ""
+            if os.path.exists('/etc/ld.so.preload'):
+                with open('/etc/ld.so.preload', 'r') as f:
+                    preload_content = f.read().strip()
+            state_key = "security:ld_preload"
+            current_status = "CRITICAL" if preload_content else "OK"
+            msg = f"Userland rootkit suspected! /etc/ld.so.preload is active with: {preload_content[:200]}" if preload_content else "No system-wide LD_PRELOAD hooks present."
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_suspicious_activity",
+                    "target": "ld_preload",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] ld.so.preload check failure: {e}", flush=True)
+
+        # --- 2. Rogue UID 0 accounts (persistent condition) ---
+        try:
+            rogue_uid0 = []
+            with open('/etc/passwd', 'r') as f:
+                for line in f:
+                    parts = line.split(':')
+                    if len(parts) >= 3 and parts[2] == '0' and parts[0] != 'root':
+                        rogue_uid0.append(parts[0])
+            state_key = "security:uid0_accounts"
+            current_status = "CRITICAL" if rogue_uid0 else "OK"
+            msg = f"Privilege escalation backdoor suspected! Non-root accounts with UID 0: {', '.join(rogue_uid0)}" if rogue_uid0 else "No unauthorized UID 0 accounts present."
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_suspicious_activity",
+                    "target": "uid0_accounts",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] UID 0 account scan failure: {e}", flush=True)
+
+        # --- 3. Suspicious processes (persistent condition) ---
+        try:
+            findings = self._scan_suspicious_processes()
+            state_key = "security:susp_processes"
+            current_status = "CRITICAL" if findings else "OK"
+            msg = f"Suspicious process activity detected: {' | '.join(findings)}" if findings else "Process behavioral scan clean."
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_suspicious_activity",
+                    "target": "processes",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] Suspicious process scan failure: {e}", flush=True)
+
+        # --- 4. SUID binaries in temp dirs (persistent condition) ---
+        try:
+            proc = subprocess.run(
+                ["find", "/tmp", "/var/tmp", "/dev/shm", "-xdev", "-type", "f", "-perm", "-4000"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30
+            )
+            suid_files = [l for l in proc.stdout.splitlines() if l.strip()]
+            state_key = "security:suid_tmp"
+            current_status = "CRITICAL" if suid_files else "OK"
+            msg = f"SUID binaries planted in temp dirs (exploit staging): {', '.join(suid_files)}" if suid_files else "No SUID binaries in temp dirs."
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_suspicious_activity",
+                    "target": "suid_binaries",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] SUID temp dir scan failure: {e}", flush=True)
 
         return events
 
@@ -445,6 +812,9 @@ class SentinelAgent:
         if not storage_config.get('monitor_raid', False):
             return events
 
+        if self.is_virtual:
+            return events
+
         if not os.path.exists("/proc/mdstat"):
             return events
 
@@ -480,12 +850,14 @@ class SentinelAgent:
         if not storage_config.get('monitor_wearout', False):
             return events
 
+        if self.is_virtual:
+            return events
+
         drives = []
         try:
             for d in os.listdir("/sys/block/"):
-                if d.startswith(("sd", "nvme")):
-                    if not re.search(r"p\d+$|\d+$", d):
-                        drives.append(f"/dev/{d}")
+                if re.match(r'^(sd[a-z]+|nvme\d+n\d+)$', d):
+                    drives.append(f"/dev/{d}")
         except Exception:
             return events
 
@@ -529,6 +901,51 @@ class SentinelAgent:
                     })
             except Exception as e:
                 print(f"[-] SMART query abstraction error for {drive}: {e}")
+        return events
+
+    def check_disk_health(self):
+        """SMART overall health check for physical drives. Skipped on virtual machines."""
+        events = []
+        if not self.config.get('checks', {}).get('storage', {}).get('monitor_disk_health', False):
+            return events
+        if self.is_virtual:
+            return events
+
+        drives = []
+        try:
+            for d in os.listdir("/sys/block/"):
+                if re.match(r'^sd[a-z]$', d) or re.match(r'^nvme\d+n\d+$', d) or re.match(r'^hd[a-z]$', d):
+                    drives.append(f"/dev/{d}")
+        except Exception:
+            return events
+
+        for drive in drives:
+            try:
+                proc = subprocess.run(
+                    ["smartctl", "-H", drive],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                )
+                output = proc.stdout
+                state_key = f"storage:health:{drive}"
+
+                if "FAILED" in output:
+                    current_status = "CRITICAL"
+                    msg = f"SMART health FAILED for drive '{drive}'! Possible imminent hardware failure."
+                elif "PASSED" in output or "OK" in output:
+                    current_status = "OK"
+                    msg = f"Drive '{drive}' SMART health check passed."
+                else:
+                    continue  # SMART not supported or inconclusive
+
+                if self.should_report(state_key, msg):
+                    events.append({
+                        "plugin": "agent_disk_health_monitor",
+                        "target": drive,
+                        "status": current_status,
+                        "message": msg
+                    })
+            except Exception as e:
+                print(f"[-] SMART health check error for {drive}: {e}", flush=True)
         return events
 
     def check_oom_killer_events(self):
@@ -824,9 +1241,109 @@ class SentinelAgent:
                 print(f"[-] SSL certificate parsing exception for {cert_path}: {e}")
         return events
 
+    def check_memory_usage(self):
+        events = []
+        mem_config = self.config.get('checks', {}).get('memory', {})
+        if not mem_config.get('enabled', False):
+            return events
+
+        warn_pct = mem_config.get('warn_percent', 85)
+        crit_pct = mem_config.get('crit_percent', 95)
+        monitor_swap = mem_config.get('monitor_swap', True)
+
+        try:
+            meminfo = {}
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    parts = line.split(':')
+                    if len(parts) == 2:
+                        meminfo[parts[0].strip()] = int(parts[1].strip().split()[0])
+
+            mem_total = meminfo.get('MemTotal', 0)
+            mem_available = meminfo.get('MemAvailable', 0)
+            if mem_total > 0:
+                used_pct = ((mem_total - mem_available) / mem_total) * 100
+                state_key = "memory:ram"
+                if used_pct >= crit_pct:
+                    current_status = "CRITICAL"
+                    msg = "RAM utilization has exceeded critical threshold."
+                elif used_pct >= warn_pct:
+                    current_status = "WARNING"
+                    msg = "RAM utilization has exceeded warning threshold."
+                else:
+                    current_status = "OK"
+                    msg = "RAM utilization within safe limits."
+                if self.should_report(state_key, msg):
+                    events.append({
+                        "plugin": "agent_memory_monitor",
+                        "target": "ram",
+                        "status": current_status,
+                        "message": f"{msg} Used: {used_pct:.1f}% ({(mem_total - mem_available) // 1024} MB / {mem_total // 1024} MB)."
+                    })
+
+            if monitor_swap:
+                swap_total = meminfo.get('SwapTotal', 0)
+                swap_free = meminfo.get('SwapFree', 0)
+                if swap_total > 0:
+                    swap_used_pct = ((swap_total - swap_free) / swap_total) * 100
+                    state_key = "memory:swap"
+                    if swap_used_pct >= crit_pct:
+                        current_status = "CRITICAL"
+                        msg = "Swap space utilization has exceeded critical threshold."
+                    elif swap_used_pct >= warn_pct:
+                        current_status = "WARNING"
+                        msg = "Swap space utilization has exceeded warning threshold."
+                    else:
+                        current_status = "OK"
+                        msg = "Swap space utilization within safe limits."
+                    if self.should_report(state_key, msg):
+                        events.append({
+                            "plugin": "agent_memory_monitor",
+                            "target": "swap",
+                            "status": current_status,
+                            "message": f"{msg} Used: {swap_used_pct:.1f}% ({(swap_total - swap_free) // 1024} MB / {swap_total // 1024} MB)."
+                        })
+
+        except Exception as e:
+            print(f"[-] Memory utilization read failure: {e}", flush=True)
+        return events
+
+    def _save_state(self):
+        state_dir = os.path.dirname(self.state_file)
+        try:
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            with open(self.state_file, 'w') as f:
+                json.dump({
+                    "updated": datetime.now(timezone.utc).isoformat(),
+                    "hostname": self.hostname,
+                    "issues": self.active_issues
+                }, f, indent=2)
+        except Exception as e:
+            print(f"[-] State file write failure: {e}", flush=True)
+
+    def print_issues(self):
+        if not os.path.exists(self.state_file):
+            print(f"No state file found at {self.state_file}. Is sentinel-agent running?")
+            return
+        with open(self.state_file, 'r') as f:
+            state = json.load(f)
+        issues = state.get('issues', {})
+        hostname = state.get('hostname', 'unknown')
+        updated = state.get('updated', 'unknown')
+        print(f"Active issues on {hostname}  (last update: {updated})")
+        print("-" * 60)
+        if not issues:
+            print("  No active issues.")
+            return
+        for _, issue in sorted(issues.items()):
+            print(f"  [{issue['status']}] {issue['target']} ({issue['plugin']})")
+            print(f"    {issue['message']}")
+            print()
+
     def push_to_sentinel(self, events):
         """
-        Odesila datovy ramec na centralni server. 
+        Odesila datovy ramec na centralni server.
         Odstranena blokovaci podminka udrzuje heartbeat aktivni.
         """
         payload = {
@@ -836,10 +1353,10 @@ class SentinelAgent:
         }
         
         try:
-            resp = requests.post(
-                f"{self.api_url}/api/v1/agent/ingest", 
-                headers=self.headers, 
-                json=payload, 
+            resp = self.session.post(
+                f"{self.api_url}/api/v1/agent/ingest",
+                headers=self.headers,
+                json=payload,
                 timeout=5
             )
             resp.raise_for_status()
@@ -905,10 +1422,13 @@ class SentinelAgent:
                 events.extend(self.check_mounts())
                 events.extend(self.check_network_ports())
                 events.extend(self.check_security_metrics())
+                events.extend(self.check_suspicious_activity())
+                events.extend(self.check_kernel_cves())
                 events.extend(self.check_temperature())
                 events.extend(self.check_storage_capacity())
                 events.extend(self.check_raid_arrays())
                 events.extend(self.check_ssd_wearout())
+                events.extend(self.check_disk_health())
                 events.extend(self.check_oom_killer_events())
                 events.extend(self.check_zombie_processes())
                 events.extend(self.check_time_synchronization())
@@ -918,8 +1438,40 @@ class SentinelAgent:
                 events.extend(self.check_conntrack_pressure())
                 events.extend(self.check_kernel_taint())
                 events.extend(self.check_ssl_cert_expiration())
+                events.extend(self.check_memory_usage())
                 
-                self.push_to_sentinel(events)
+                # Update active issue registry from this cycle's deltas FIRST.
+                for evt in events:
+                    issue_key = f"{evt['plugin']}:{evt['target']}"
+                    if evt['status'] == 'OK':
+                        self.active_issues.pop(issue_key, None)
+                    else:
+                        self.active_issues[issue_key] = {
+                            'status': evt['status'],
+                            'message': evt['message'],
+                            'target': evt['target'],
+                            'plugin': evt['plugin'],
+                            'updated': datetime.now(timezone.utc).isoformat()
+                        }
+                self._save_state()
+
+                # Re-affirm ALL currently-active issues every cycle. The central server
+                # auto-resolves AGENT issues absent from a report after a few cycles
+                # (missing_count threshold), so a delta-only push made still-active
+                # issues vanish — and a server restart "forgot" them entirely. OK
+                # transitions stay in `events` so resolutions still propagate.
+                push_events = list(events)
+                _delta_keys = {f"{e['plugin']}:{e['target']}" for e in events}
+                for _k, _info in self.active_issues.items():
+                    if _k not in _delta_keys:
+                        push_events.append({
+                            "plugin": _info['plugin'],
+                            "target": _info['target'],
+                            "status": _info['status'],
+                            "message": _info['message'],
+                        })
+                self.push_to_sentinel(push_events)
+
             except Exception as loop_err:
                 print(f"[{datetime.now().isoformat()}] Internal runtime processing loop error: {loop_err}", flush=True)
                 
@@ -929,10 +1481,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sentinel Agent Configuration Suite")
     parser.add_argument("--test", action="store_true", help="Send a test delta execution and exit")
     parser.add_argument("--fast", action="store_true", help="Run loop with 5s boot delay and 5s interval for quick manual testing")
+    parser.add_argument("--issues", action="store_true", help="Print active issues from state file and exit")
     args = parser.parse_args()
-    
+
     agent = SentinelAgent(fast_mode=args.fast)
-    if args.test:
+    if args.issues:
+        agent.print_issues()
+    elif args.test:
         agent.send_test_issue()
     else:
         agent.run_loop()
