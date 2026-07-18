@@ -6,7 +6,7 @@
 
 1. ✅ ~~Detekce nových SSH authorized_keys~~ — HOTOVO: baseline hash root + /home/* v `check_suspicious_activity` (persistence_files).
 2. ✅ ~~Monitoring nových cronů~~ — HOTOVO: /etc/crontab, /etc/cron.d, /var/spool/cron v persistence_files baseline. Zbývá: systemd timery.
-3. 🔴 Detekce procesů se smazaným binárním souborem (`/proc/PID/exe` → `(deleted)`) běžících z temp cest — miner se často po spuštění smaže.
+3. ✅ ~~Detekce procesů se smazaným binárním souborem~~ — HOTOVO: deleted exe mimo systémové cesty + fileless memfd exekutably.
 4. ✅ ~~Kontrola `LD_PRELOAD` a `/etc/ld.so.preload`~~ — HOTOVO: CRITICAL při neprázdném /etc/ld.so.preload.
 5. 🟡 Baseline SUID/SGID binárek v celém systému (ne jen temp dirs) — alert na nově přibyvší SUID soubor.
 6. 🟡 Detekce promiskuitního režimu síťových rozhraní (sniffing) — flag IFF_PROMISC z `/sys/class/net/*/flags`.
@@ -30,10 +30,10 @@
 
 ## Spolehlivost agenta
 
-21. 🔴 Persistovat `last_reported_states` a baselines (ports, critical_files) do state souboru — po restartu agenta se teď ztratí a přeposílají se OK/duplicity.
+21. ✅ ~~Persistovat `last_reported_states` a baselines~~ — HOTOVO: reported_states + file-integrity baselines ve state.json, restore při startu. Port baseline se záměrně resetuje restartem (dokumentovaný mechanismus přijetí nových portů).
 22. 🔴 Retry/backoff fronta pro push_to_sentinel — při výpadku serveru se eventy zahodí; ukládat do bufferu a odeslat po obnovení.
-23. 🔴 Git auto-update: ověřit, že nový kód projde `py_compile` PŘED restartem — jinak si agent stáhne rozbitý kód a už nenastartuje.
-24. 🟡 Timeout u všech subprocess.run volání (smartctl umí viset na vadném disku — teď zablokuje celý cyklus).
+23. ✅ ~~Git auto-update: py_compile před restartem~~ — HOTOVO: rozbité commity se rollbacknou a nahlásí CRITICAL místo suicide restartu.
+24. ✅ ~~Timeout u všech subprocess.run volání~~ — HOTOVO: 10–120 s podle nástroje (smartctl 30 s, apt/dnf 120 s).
 25. 🟡 Watchdog integrace se systemd (`WatchdogSec` + `sd_notify`) — detekce zamrzlého agenta.
 26. 🟡 Hlídat vlastní paměť/CPU agenta a self-restart při překročení limitu.
 27. 🟡 dmesg čtení: použít `dmesg --since` nebo journal kursor místo full-scan + regex countu (ring buffer se přetáčí → OOM count je nespolehlivý).

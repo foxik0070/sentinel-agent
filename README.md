@@ -279,7 +279,7 @@ The monolithic agent execution block contains 24 built-in sub-modules. Each modu
     *   **persistence_files:** SHA-256 baseline of SSH `authorized_keys` (root + every `/home` user) and cron entries (`/etc/crontab`, `/etc/cron.d/*`, `/var/spool/cron/*`). Added, removed, or modified files trigger `CRITICAL` — these are the classic persistence mechanisms planted after CVE exploitation.
     *   **ld_preload:** A non-empty `/etc/ld.so.preload` triggers `CRITICAL` — system-wide LD_PRELOAD hooks are the signature of userland rootkits.
     *   **uid0_accounts:** Parses `/etc/passwd` for non-root accounts with UID 0 (privilege escalation backdoor). Persistent `CRITICAL` while present.
-    *   **processes:** Walks `/proc` and flags processes executing from `/tmp`, `/var/tmp`, `/dev/shm`, known cryptominer names (xmrig, kinsing, kdevtmpfsi, ...), and reverse-shell patterns in command lines (`/dev/tcp/`, `nc -e`, `socat exec`, `pty.spawn`, ...).
+    *   **processes:** Walks `/proc` and flags processes executing from `/tmp`, `/var/tmp`, `/dev/shm`, fileless (memfd) executables, processes running from deleted binaries outside system paths (self-deleting payloads; `/usr`, `/opt`, `/lib`, ... are excluded to avoid package-upgrade false positives), known cryptominer names (xmrig, kinsing, kdevtmpfsi, ...), and reverse-shell patterns in command lines (`/dev/tcp/`, `nc -e`, `socat exec`, `pty.spawn`, ...).
     *   **suid_binaries:** Runs `find` over temp directories for SUID-root files (exploit staging artifacts).
 
 ### 23. `agent_security_kernel_cve`
@@ -301,8 +301,12 @@ The entire configuration for the agent is managed within a single structured fil
 # Agent Core
 # ==========================================================================
 agent_core:
-  git_auto_update: false          # Pull latest code from git and restart via systemd suicide
-  state_file: /var/lib/sentinel/state.json  # Active issue registry (read by agent_issues)
+  git_auto_update: false          # Pull latest code from git and restart via systemd suicide.
+                                  # Pulled code is sanity-compiled first; a broken commit is
+                                  # rolled back and reported CRITICAL instead of restarting.
+  state_file: /var/lib/sentinel/state.json  # Active issue registry (read by agent_issues).
+                                  # Also persists reported states and file-integrity baselines
+                                  # across agent restarts (port baseline intentionally resets).
 
 # ==========================================================================
 # Central Sentinel API Authorization Credentials

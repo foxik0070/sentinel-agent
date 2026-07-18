@@ -108,6 +108,33 @@ class SentinelAgent:
             self.session.mount('http://', adapter)
             self.session.mount('https://', adapter)
 
+        # Restore persisted state so a restart neither re-spams OK transitions nor
+        # opens a re-baseline window an attacker could use to launder file changes.
+        self._load_state()
+
+    def _load_state(self):
+        try:
+            if not os.path.exists(self.state_file):
+                return
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+            if state.get('hostname') != self.hostname:
+                return
+            self.active_issues = state.get('issues', {})
+            self.last_reported_states = state.get('reported_states', {})
+            baselines = state.get('baselines', {})
+            if baselines.get('critical_files'):
+                self.critical_file_hashes = baselines['critical_files']
+                self.critical_files_initialized = True
+            if baselines.get('persistence_files'):
+                self.persistence_file_hashes = baselines['persistence_files']
+                self.persistence_files_initialized = True
+            print(f"[*] Restored persisted state: {len(self.active_issues)} active issues, "
+                  f"{len(self.last_reported_states)} reported states, integrity baselines "
+                  f"{'restored' if self.critical_files_initialized else 'fresh'}.", flush=True)
+        except Exception as e:
+            print(f"[-] State restore failure (starting fresh): {e}", flush=True)
+
     def _detect_os_family(self):
         """Heuristically detects the underlying Linux distribution family."""
         if os.path.exists("/etc/debian_version"): return "debian"
@@ -119,7 +146,7 @@ class SentinelAgent:
         try:
             result = subprocess.run(
                 ["systemd-detect-virt"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10
             )
             return result.stdout.strip() != "none"
         except Exception:
@@ -169,14 +196,32 @@ class SentinelAgent:
             return
             
         try:
-            local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True).strip()
-            subprocess.run(["git", "fetch"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            remote_sha = subprocess.check_output(["git", "rev-parse", "@{u}"], cwd=repo_dir, text=True).strip()
+            local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True, timeout=60).strip()
+            subprocess.run(["git", "fetch"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            remote_sha = subprocess.check_output(["git", "rev-parse", "@{u}"], cwd=repo_dir, text=True, timeout=60).strip()
             
             if local_sha != remote_sha:
                 print(f"[{datetime.now().isoformat()}] 🔄 Drift detected in Git repository! Initiating git pull...", flush=True)
-                subprocess.run(["git", "pull"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
+                subprocess.run(["git", "pull"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+
+                # Sanity-compile the pulled code BEFORE the suicide restart — a broken
+                # remote commit would otherwise leave the agent dead until manual fix.
+                compile_proc = subprocess.run(
+                    [sys.executable, "-m", "py_compile", os.path.abspath(__file__)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=60
+                )
+                if compile_proc.returncode != 0:
+                    subprocess.run(["git", "reset", "--hard", local_sha], cwd=repo_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                    msg = f"Auto-update ABORTED: commit {remote_sha[:7]} fails to compile, rolled back to {local_sha[:7]}. Fix the remote repository. Error: {compile_proc.stderr.strip()[:200]}"
+                    print(f"[{datetime.now().isoformat()}] ❌ {msg}", flush=True)
+                    self.push_to_sentinel([{
+                        "plugin": "agent_core_updater",
+                        "target": "auto_update",
+                        "status": "CRITICAL",
+                        "message": msg
+                    }])
+                    return
+
                 msg = f"Agent source code auto-updated via Git (from {local_sha[:7]} to {remote_sha[:7]}). Executing Systemd Suicide restart."
                 print(f"[{datetime.now().isoformat()}] ✅ {msg}", flush=True)
                 
@@ -219,7 +264,7 @@ class SentinelAgent:
 
             result = subprocess.run(
                 ["systemctl", "is-active", name],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10
             )
             state = result.stdout.strip()
             current_status = severity if state not in ["active", "inactive"] else "OK"
@@ -272,7 +317,7 @@ class SentinelAgent:
         active_ports = set()
         ignored_ports = {"123", "53", "68", "111", "22", "80", "443"}
         try:
-            proc = subprocess.run(["ss", "-tulpn"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = subprocess.run(["ss", "-tulpn"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
             lines = proc.stdout.splitlines()
             for line in lines[1:]:
                 parts = line.split()
@@ -329,7 +374,7 @@ class SentinelAgent:
             state_key = "security:root_logins"
             ignore_ips = sec_config.get('root_login_ignore_ips', [])
             try:
-                who_proc = subprocess.run(["who"], stdout=subprocess.PIPE, text=True)
+                who_proc = subprocess.run(["who"], stdout=subprocess.PIPE, text=True, timeout=10)
                 root_sessions = []
                 for line in who_proc.stdout.splitlines():
                     if line.startswith("root"):
@@ -372,19 +417,19 @@ class SentinelAgent:
             sec_packages = []
             try:
                 if self.os_family == "debian":
-                    apt_proc = subprocess.run(["apt-get", "-s", "upgrade"], stdout=subprocess.PIPE, text=True)
+                    apt_proc = subprocess.run(["apt-get", "-s", "upgrade"], stdout=subprocess.PIPE, text=True, timeout=120)
                     upgrade_lines = [l for l in apt_proc.stdout.splitlines() if l.startswith("Inst ")]
                     update_count = len(upgrade_lines)
                     sec_lines = [l for l in upgrade_lines if "security" in l.lower() or "cve" in l.lower()]
                     sec_update_count = len(sec_lines)
                     sec_packages = [l.split()[1] for l in sec_lines if len(l.split()) > 1]
                 elif self.os_family == "rhel":
-                    dnf_proc = subprocess.run(["dnf", "check-update", "--security"], stdout=subprocess.PIPE, text=True)
+                    dnf_proc = subprocess.run(["dnf", "check-update", "--security"], stdout=subprocess.PIPE, text=True, timeout=120)
                     if dnf_proc.returncode == 100:
                         sec_lines = [l for l in dnf_proc.stdout.splitlines() if l.strip() and not l.startswith(('Last metadata', 'Obsoleting'))]
                         sec_update_count = len(sec_lines)
                         sec_packages = [l.split()[0] for l in sec_lines if l.split()]
-                    dnf_all = subprocess.run(["dnf", "check-update"], stdout=subprocess.PIPE, text=True)
+                    dnf_all = subprocess.run(["dnf", "check-update"], stdout=subprocess.PIPE, text=True, timeout=120)
                     if dnf_all.returncode == 100:
                         update_count = len([l for l in dnf_all.stdout.splitlines() if l.strip()])
 
@@ -437,14 +482,14 @@ class SentinelAgent:
         if sec_config.get('fail2ban_stats', False):
             state_key = "security:fail2ban"
             try:
-                f2b_proc = subprocess.run(["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                f2b_proc = subprocess.run(["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15)
                 if f2b_proc.returncode == 0:
                     jails = re.findall(r"Jail list:\s+(.*)", f2b_proc.stdout)
                     if jails:
                         jail_list = [j.strip() for j in jails[0].split(",")]
                         total_banned = 0
                         for jail in jail_list:
-                            j_stat = subprocess.run(["fail2ban-client", "status", jail], stdout=subprocess.PIPE, text=True)
+                            j_stat = subprocess.run(["fail2ban-client", "status", jail], stdout=subprocess.PIPE, text=True, timeout=15)
                             banned_match = re.search(r"Currently banned:\s+(\d+)", j_stat.stdout)
                             if banned_match: total_banned += int(banned_match.group(1))
                                 
@@ -466,6 +511,9 @@ class SentinelAgent:
     # (Dirty COW / Dirty Pipe exploits typically rewrite /etc/passwd or sudoers).
     CRITICAL_FILES = ["/etc/passwd", "/etc/shadow", "/etc/sudoers"]
     TMP_EXEC_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
+    # Deleted binaries under these prefixes are normal after package upgrades;
+    # anywhere else (typically /home, /root, /var) it signals a self-deleting payload.
+    SYSTEM_EXEC_PREFIXES = ("/usr/", "/opt/", "/lib", "/bin/", "/sbin/", "/snap/", "/nix/")
     MINER_NAMES = {"xmrig", "xmr-stak", "minerd", "cpuminer", "kinsing", "kdevtmpfsi"}
     REVSHELL_PATTERNS = [
         r"/dev/tcp/\d",
@@ -573,8 +621,15 @@ class SentinelAgent:
             except Exception:
                 exe = ""
 
-            if exe.startswith(self.TMP_EXEC_DIRS):
+            deleted = exe.endswith(" (deleted)")
+            exe_path = exe[:-len(" (deleted)")] if deleted else exe
+
+            if exe_path.startswith(self.TMP_EXEC_DIRS):
                 findings.append(f"'{comm}' (PID {pid}) executing from temp dir: {exe}")
+            elif exe_path.startswith("/memfd:") or exe_path.startswith("memfd:"):
+                findings.append(f"fileless (memfd) executable '{comm}' (PID {pid}): {exe}")
+            elif deleted and exe_path and not exe_path.startswith(self.SYSTEM_EXEC_PREFIXES):
+                findings.append(f"'{comm}' (PID {pid}) running from deleted binary: {exe} (self-deleting payload?)")
             elif comm in self.MINER_NAMES:
                 findings.append(f"known cryptominer process '{comm}' (PID {pid})")
             elif cmdline and any(re.search(p, cmdline) for p in self.REVSHELL_PATTERNS):
@@ -863,7 +918,7 @@ class SentinelAgent:
 
         for drive in drives:
             try:
-                proc = subprocess.run(["smartctl", "-A", drive], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                proc = subprocess.run(["smartctl", "-A", drive], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
                 if proc.returncode != 0:
                     continue
                 
@@ -923,7 +978,7 @@ class SentinelAgent:
             try:
                 proc = subprocess.run(
                     ["smartctl", "-H", drive],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30
                 )
                 output = proc.stdout
                 state_key = f"storage:health:{drive}"
@@ -954,7 +1009,7 @@ class SentinelAgent:
             return events
 
         try:
-            proc = subprocess.run(["dmesg"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = subprocess.run(["dmesg"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
             oom_hits = re.findall(r"(Out of memory: Kill process|Killed process \d+ \(.+?\) total-vm)", proc.stdout, re.IGNORECASE)
             current_count = len(oom_hits)
 
@@ -997,7 +1052,7 @@ class SentinelAgent:
 
         max_zombies = kernel_config.get('max_zombies', 5)
         try:
-            proc = subprocess.run(["ps", "-eo", "state"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = subprocess.run(["ps", "-eo", "state"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
             zombie_count = proc.stdout.splitlines().count("Z")
 
             state_key = "kernel:zombies"
@@ -1026,7 +1081,7 @@ class SentinelAgent:
             return events
 
         try:
-            proc = subprocess.run(["timedatectl"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = subprocess.run(["timedatectl"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
             state_key = "system:time_sync"
             if "System clock synchronized: yes" in proc.stdout or "NTP service: active" in proc.stdout:
                 current_status = "OK"
@@ -1076,7 +1131,7 @@ class SentinelAgent:
             return events
 
         try:
-            proc = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-legend"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-legend"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
             failed_units = [line.split()[0] for line in proc.stdout.splitlines() if line.strip()]
 
             state_key = "systemd:global_failures"
@@ -1104,7 +1159,7 @@ class SentinelAgent:
             return events
 
         try:
-            proc = subprocess.run(["ps", "-eo", "state,pid,comm"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = subprocess.run(["ps", "-eo", "state,pid,comm"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
             d_processes = []
             for line in proc.stdout.splitlines():
                 if line.strip().startswith("D"):
@@ -1210,7 +1265,7 @@ class SentinelAgent:
             if not os.path.exists(cert_path):
                 continue
             try:
-                proc = subprocess.run(["openssl", "x509", "-enddate", "-noout", "-in", cert_path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                proc = subprocess.run(["openssl", "x509", "-enddate", "-noout", "-in", cert_path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
                 if proc.returncode != 0:
                     continue
                 
@@ -1317,7 +1372,12 @@ class SentinelAgent:
                 json.dump({
                     "updated": datetime.now(timezone.utc).isoformat(),
                     "hostname": self.hostname,
-                    "issues": self.active_issues
+                    "issues": self.active_issues,
+                    "reported_states": self.last_reported_states,
+                    "baselines": {
+                        "critical_files": self.critical_file_hashes,
+                        "persistence_files": self.persistence_file_hashes
+                    }
                 }, f, indent=2)
         except Exception as e:
             print(f"[-] State file write failure: {e}", flush=True)
