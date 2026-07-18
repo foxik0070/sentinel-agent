@@ -91,6 +91,10 @@ class SentinelAgent:
         self.active_issues = {}
         self.flap_counts = {}
 
+        # --- Retry Buffer (events from failed pushes, replayed on next success) ---
+        self.pending_events = []
+        self.max_pending_events = self.config.get('agent_core', {}).get('max_pending_events', 500)
+
         # --- Suspicious Activity Baselines (critical file integrity) ---
         self.critical_file_hashes = {}
         self.critical_files_initialized = False
@@ -122,6 +126,7 @@ class SentinelAgent:
                 return
             self.active_issues = state.get('issues', {})
             self.last_reported_states = state.get('reported_states', {})
+            self.pending_events = state.get('pending_events', [])
             baselines = state.get('baselines', {})
             if baselines.get('critical_files'):
                 self.critical_file_hashes = baselines['critical_files']
@@ -1374,6 +1379,7 @@ class SentinelAgent:
                     "hostname": self.hostname,
                     "issues": self.active_issues,
                     "reported_states": self.last_reported_states,
+                    "pending_events": self.pending_events,
                     "baselines": {
                         "critical_files": self.critical_file_hashes,
                         "persistence_files": self.persistence_file_hashes
@@ -1405,13 +1411,29 @@ class SentinelAgent:
         """
         Odesila datovy ramec na centralni server.
         Odstranena blokovaci podminka udrzuje heartbeat aktivni.
+        Eventy z neuspesnych pushu se bufferuji a preposlou pri obnoveni spojeni.
         """
+        # Replay buffered events from previous failed pushes. Exact duplicates are
+        # dropped (re-affirmations repeat identically every cycle) while distinct
+        # state transitions are preserved in original order. A stale intermediate
+        # state surviving dedup is corrected by the next re-affirmation cycle.
+        if self.pending_events:
+            print(f"[{datetime.now().isoformat()}] Replaying {len(self.pending_events)} buffered events from failed pushes.", flush=True)
+            merged, seen = [], set()
+            for evt in self.pending_events + list(events):
+                key = (evt['plugin'], evt['target'], evt['status'], evt['message'])
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(evt)
+            events = merged
+
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hostname": self.hostname,
             "events": events
         }
-        
+
         try:
             resp = self.session.post(
                 f"{self.api_url}/api/v1/agent/ingest",
@@ -1420,14 +1442,24 @@ class SentinelAgent:
                 timeout=5
             )
             resp.raise_for_status()
-            
+            self.pending_events = []
+
             if events:
                 print(f"[{datetime.now().isoformat()}] Pushed {len(events)} state updates.", flush=True)
             else:
                 print(f"[{datetime.now().isoformat()}] Pushed heartbeat matrix (0 state updates).", flush=True)
-                
+
         except requests.exceptions.RequestException as e:
-            print(f"[{datetime.now().isoformat()}] Failed to push package streams: {e}", flush=True)
+            if events:
+                dropped = len(events) - self.max_pending_events
+                self.pending_events = events[-self.max_pending_events:]
+                buffer_note = f" Buffered {len(self.pending_events)} events for retry"
+                buffer_note += f" ({dropped} oldest dropped, buffer full)." if dropped > 0 else "."
+            else:
+                buffer_note = ""
+            print(f"[{datetime.now().isoformat()}] Failed to push package streams: {e}.{buffer_note}", flush=True)
+            if self.pending_events:
+                self._save_state()  # persist the buffer now - a restart mid-outage must not lose it
 
     def send_test_issue(self):
         print(f"Connecting to Sentinel central API at {self.api_url} as identity '{self.hostname}'...", flush=True)

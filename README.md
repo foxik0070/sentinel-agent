@@ -105,6 +105,7 @@ The agent communicates with the Central Sentinel API using a stateless, asynchro
 1.  **Authentication:** Every transmission must include the HTTP header: `Authorization: Bearer <secure_token>`.
 2.  **Content Negotiation:** Payloads are transmitted inside the HTTP request body using `Content-Type: application/json`.
 3.  **Timestamp Enforcements:** Timestamps use the ISO 8601 format with explicit UTC time zone offsets (`YYYY-MM-DDTHH:MM:SS.ffffff+00:00`).
+4.  **Outage Resilience (Retry Buffer):** Events from failed pushes are buffered in memory, persisted into the state file (surviving agent restarts mid-outage), and replayed on the next successful push. Exact duplicates (identical re-affirmations) are deduplicated; the buffer is capped at `agent_core.max_pending_events` (default `500`, oldest dropped first).
 
 ### Message Exchange Sequence Matrix
 
@@ -305,8 +306,10 @@ agent_core:
                                   # Pulled code is sanity-compiled first; a broken commit is
                                   # rolled back and reported CRITICAL instead of restarting.
   state_file: /var/lib/sentinel/state.json  # Active issue registry (read by agent_issues).
-                                  # Also persists reported states and file-integrity baselines
-                                  # across agent restarts (port baseline intentionally resets).
+                                  # Also persists reported states, file-integrity baselines and
+                                  # the retry buffer across agent restarts (port baseline
+                                  # intentionally resets).
+  max_pending_events: 500         # Retry buffer cap for events from failed pushes
 
 # ==========================================================================
 # Central Sentinel API Authorization Credentials

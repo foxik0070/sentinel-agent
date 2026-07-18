@@ -31,7 +31,7 @@
 ## Spolehlivost agenta
 
 21. ✅ ~~Persistovat `last_reported_states` a baselines~~ — HOTOVO: reported_states + file-integrity baselines ve state.json, restore při startu. Port baseline se záměrně resetuje restartem (dokumentovaný mechanismus přijetí nových portů).
-22. 🔴 Retry/backoff fronta pro push_to_sentinel — při výpadku serveru se eventy zahodí; ukládat do bufferu a odeslat po obnovení.
+22. ✅ ~~Retry fronta pro push_to_sentinel~~ — HOTOVO: buffer s dedupem, persistence přes restart, cap `max_pending_events` (500), replay při obnovení spojení.
 23. ✅ ~~Git auto-update: py_compile před restartem~~ — HOTOVO: rozbité commity se rollbacknou a nahlásí CRITICAL místo suicide restartu.
 24. ✅ ~~Timeout u všech subprocess.run volání~~ — HOTOVO: 10–120 s podle nástroje (smartctl 30 s, apt/dnf 120 s).
 25. 🟡 Watchdog integrace se systemd (`WatchdogSec` + `sd_notify`) — detekce zamrzlého agenta.
