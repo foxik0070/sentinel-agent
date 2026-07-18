@@ -14,7 +14,7 @@
 8. ✅ ~~Monitoring selhání sudo/su pokusů z journalu~~ — HOTOVO: journal cursor delta, WARNING při burstu ≥ sudo_fail_threshold (default 3) za cyklus.
 9. 🟡 Detekce nově přidaných uživatelů do skupin sudo/wheel/docker (docker skupina = root ekvivalent).
 10. ✅ ~~Kontrola kernel modulů proti baseline~~ — HOTOVO: baseline z /proc/modules, WARNING na nově načtený modul (LKM rootkit), persistence přes restart.
-11. 🟡 Rozšířit reverse-shell vzory o perl/php/ruby one-linery a msfvenom stopy.
+11. ✅ ~~Rozšířit reverse-shell vzory~~ — HOTOVO: perl/php/ruby/python one-linery, /dev/udp, exec N<>/dev/tcp, msfvenom/meterpreter (12 vzorů, otestováno proti false positives).
 12. 🟢 Kontrola immutable flagu na kritických souborech — útočník si někdy nastaví `chattr +i` na svůj backdoor.
 13. 🟢 Detekce procesů s otevřeným raw socketem (možný backdoor/scanner) přes `/proc/net/raw`.
 14. 🟢 Whitelist pro suspicious-process check (config `suspicious_ignore`) — např. legitimní skript v /tmp u CI runneru, omezení false positives.
@@ -54,7 +54,7 @@
 ## Hardware — nové checky
 
 38. ✅ ~~Raspberry Pi vcgencmd get_throttled~~ — HOTOVO: `agent_rpi_power_monitor`, undervoltage NOW = CRITICAL, ostatní + historie od bootu = WARNING; auto-skip mimo RPi.
-39. 🟡 SMART: sledovat i reallocated/pending sektory (`Reallocated_Sector_Ct`, `Current_Pending_Sector`) — selhání předchází dřív než overall health FAILED.
+39. ✅ ~~SMART reallocated/pending sektory~~ — HOTOVO: parsuje Reallocated/Pending/Uncorrectable (SATA) + Media/Data Integrity Errors (NVMe), CRITICAL na nenulový počet.
 40. 🟢 Monitoring otáček ventilátorů z hwmon (kde existují).
 41. 🟢 SD karta na RPi: detekce read-only remountu filesystému (typická smrt SD karty).
 

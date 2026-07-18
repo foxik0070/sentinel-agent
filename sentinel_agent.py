@@ -550,10 +550,23 @@ class SentinelAgent:
     MINER_NAMES = {"xmrig", "xmr-stak", "minerd", "cpuminer", "kinsing", "kdevtmpfsi"}
     REVSHELL_PATTERNS = [
         r"/dev/tcp/\d",
+        r"/dev/udp/\d",
         r"\bnc(at)?\b.*\s-e\s",
         r"\bsocat\b.*\bexec\b",
         r"pty\.spawn",
         r"\bsh -i\b.*\d+\.\d+\.\d+\.\d+",
+        # perl reverse shell: perl -e '...socket...exec...'
+        r"perl\b.*-e.*socket.*(exec|/bin/sh)",
+        # php reverse shell: php -r 'fsockopen ... exec'
+        r"php\b.*-r.*fsockopen",
+        # ruby reverse shell: ruby -rsocket ... TCPSocket ... exec
+        r"ruby\b.*(-rsocket|TCPSocket).*exec",
+        # python socket-based shell without pty.spawn
+        r"python[0-9.]*\b.*-c.*socket.*(subprocess|/bin/sh|/bin/bash)",
+        # bash /dev/tcp redirect via exec
+        r"exec\s+\d+<>/dev/tcp/",
+        # msfvenom / meterpreter staging artifacts
+        r"\b(msfvenom|meterpreter)\b",
     ]
 
     # Well-known local privilege escalation kernel CVEs actively abused in the wild.
@@ -1167,7 +1180,7 @@ class SentinelAgent:
                 proc = subprocess.run(["smartctl", "-A", drive], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
                 if proc.returncode != 0:
                     continue
-                
+
                 wearout_pct = None
                 if "nvme" in drive:
                     match = re.search(r"Percentage Used:\s+(\d+)%", proc.stdout)
@@ -1177,6 +1190,9 @@ class SentinelAgent:
                     match = re.search(r"(Media_Wearout_Indicator|Remaining_Lifetime_Perc|Wearout_Linear).*?\s+(\d+)(?=\s|$)", proc.stdout)
                     if match:
                         wearout_pct = int(match.group(2))
+
+                # Pending/reallocated sectors predict failure earlier than overall SMART health.
+                events.extend(self._check_drive_sectors(drive, proc.stdout))
 
                 if wearout_pct is None:
                     continue
@@ -1202,6 +1218,46 @@ class SentinelAgent:
                     })
             except Exception as e:
                 print(f"[-] SMART query abstraction error for {drive}: {e}")
+        return events
+
+    def _check_drive_sectors(self, drive, smart_output):
+        """Parses reallocated / pending / uncorrectable sector counts from smartctl -A.
+        A non-zero raw value is an early hardware-failure signal (SATA and NVMe)."""
+        events = []
+        # SATA SMART attribute lines: raw value is the last whitespace-separated field.
+        sata_attrs = {
+            "Reallocated_Sector_Ct": "reallocated sectors",
+            "Current_Pending_Sector": "pending sectors",
+            "Offline_Uncorrectable": "uncorrectable sectors",
+        }
+        findings = []
+        for attr, label in sata_attrs.items():
+            m = re.search(rf"^\s*\d+\s+{attr}\b.*?(\d+)\s*$", smart_output, re.MULTILINE)
+            if m and int(m.group(1)) > 0:
+                findings.append(f"{int(m.group(1))} {label}")
+        # NVMe SMART/Health section uses named fields.
+        for field, label in (("Media and Data Integrity Errors", "media/data integrity errors"),):
+            m = re.search(rf"{re.escape(field)}:\s*([\d,]+)", smart_output)
+            if m:
+                val = int(m.group(1).replace(",", ""))
+                if val > 0:
+                    findings.append(f"{val} {label}")
+
+        state_key = f"storage:sectors:{drive}"
+        if findings:
+            current_status = "CRITICAL"
+            msg = f"Drive '{drive}' reports failing sectors: {', '.join(findings)}. Back up and replace the drive - failure is imminent."
+        else:
+            current_status = "OK"
+            msg = f"Drive '{drive}' sector health clean (no reallocated/pending/uncorrectable sectors)."
+
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_ssd_wearout_monitor",
+                "target": f"{drive}:sectors",
+                "status": current_status,
+                "message": msg
+            })
         return events
 
     def check_disk_health(self):
