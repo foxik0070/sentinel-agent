@@ -77,6 +77,7 @@ class SentinelAgent:
         
         self.os_family = self._detect_os_family()
         self.is_virtual = self._is_virtual_environment()
+        self.agent_version = self._detect_agent_version()
 
         # --- Stateful Tracking Memory ---
         self.last_reported_states = {}
@@ -107,6 +108,10 @@ class SentinelAgent:
         self.suid_baseline = set()
         self.suid_baseline_initialized = False
         self.suid_cycle_counter = 0
+
+        # --- Kernel Module Baseline (rootkit detection) ---
+        self.module_baseline = set()
+        self.module_baseline_initialized = False
         self.state_file = self.config.get('agent_core', {}).get('state_file', '/var/lib/sentinel/state.json')
 
         # --- HTTP Session (optional source IP binding to prevent multi-IP duplicates) ---
@@ -142,6 +147,9 @@ class SentinelAgent:
             if baselines.get('suid_files'):
                 self.suid_baseline = set(baselines['suid_files'])
                 self.suid_baseline_initialized = True
+            if baselines.get('kernel_modules'):
+                self.module_baseline = set(baselines['kernel_modules'])
+                self.module_baseline_initialized = True
             print(f"[*] Restored persisted state: {len(self.active_issues)} active issues, "
                   f"{len(self.last_reported_states)} reported states, integrity baselines "
                   f"{'restored' if self.critical_files_initialized else 'fresh'}.", flush=True)
@@ -164,6 +172,18 @@ class SentinelAgent:
             return result.stdout.strip() != "none"
         except Exception:
             return False
+
+    def _detect_agent_version(self):
+        """Returns the agent's git commit SHA (short) so the server can spot nodes
+        running stale code. Falls back to 'unknown' outside a git checkout."""
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=repo_dir, stderr=subprocess.DEVNULL, text=True, timeout=10
+            ).strip() or "unknown"
+        except Exception:
+            return "unknown"
 
     def _get_cpu_temperature(self):
         """Reads the CPU temperature from system thermal zones (compatible with Pi and Ubuntu)."""
@@ -890,6 +910,67 @@ class SentinelAgent:
         except Exception as e:
             print(f"[-] Auth failure journal scan error: {e}", flush=True)
 
+        # --- 7. Promiscuous network interfaces (packet sniffing) ---
+        try:
+            promisc_ifaces = []
+            for iface in os.listdir('/sys/class/net'):
+                flags_path = f"/sys/class/net/{iface}/flags"
+                if not os.path.exists(flags_path):
+                    continue
+                with open(flags_path, 'r') as f:
+                    flags = int(f.read().strip(), 16)
+                if flags & 0x100:  # IFF_PROMISC
+                    promisc_ifaces.append(iface)
+            state_key = "security:promisc"
+            current_status = "WARNING" if promisc_ifaces else "OK"
+            msg = f"Network interface(s) in promiscuous mode (possible packet sniffing): {', '.join(promisc_ifaces)}" if promisc_ifaces else "No network interfaces in promiscuous mode."
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_suspicious_activity",
+                    "target": "promisc_interfaces",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] Promiscuous mode check failure: {e}", flush=True)
+
+        # --- 8. Kernel module baseline (rootkit / unexpected module load) ---
+        try:
+            current_modules = set()
+            with open('/proc/modules', 'r') as f:
+                for line in f:
+                    name = line.split()
+                    if name:
+                        current_modules.add(name[0])
+            state_key = "security:kernel_modules"
+            if not self.module_baseline_initialized:
+                self.module_baseline = current_modules
+                self.module_baseline_initialized = True
+            else:
+                new_modules = sorted(current_modules - self.module_baseline)
+                if new_modules:
+                    msg = f"New kernel module(s) loaded since baseline: {', '.join(new_modules)}. Verify this was legitimate (LKM rootkits load as kernel modules)."
+                    self.module_baseline = current_modules
+                    self.last_reported_states[state_key] = msg
+                    events.append({
+                        "plugin": "agent_security_suspicious_activity",
+                        "target": "kernel_modules",
+                        "status": "WARNING",
+                        "message": msg
+                    })
+                else:
+                    self.module_baseline = current_modules  # absorb unloads silently
+                    msg = "Loaded kernel module set matches trusted baseline."
+                    if self.should_report(state_key, msg):
+                        events.append({
+                            "plugin": "agent_security_suspicious_activity",
+                            "target": "kernel_modules",
+                            "status": "OK",
+                            "message": msg
+                        })
+        except Exception as e:
+            print(f"[-] Kernel module baseline check failure: {e}", flush=True)
+
         return events
 
     def check_temperature(self):
@@ -1574,7 +1655,8 @@ class SentinelAgent:
                     "baselines": {
                         "critical_files": self.critical_file_hashes,
                         "persistence_files": self.persistence_file_hashes,
-                        "suid_files": sorted(self.suid_baseline)
+                        "suid_files": sorted(self.suid_baseline),
+                        "kernel_modules": sorted(self.module_baseline)
                     }
                 }, f, indent=2)
         except Exception as e:
@@ -1623,6 +1705,7 @@ class SentinelAgent:
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hostname": self.hostname,
+            "agent_version": self.agent_version,
             "events": events
         }
 

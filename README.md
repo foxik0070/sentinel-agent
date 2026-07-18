@@ -137,12 +137,13 @@ Sentinel Monitored Node                                                       Ce
 ### Wire-Format Payload Examples
 
 #### Payload A: Initial Post-Boot Registration Block
-Sent exactly once after the initialization stabilization delay expires.
+Sent exactly once after the initialization stabilization delay expires. Every payload carries `agent_version` (the agent's short git SHA) so the server can flag nodes running stale code.
 
 ```json
 {
   "timestamp": "2026-05-18T16:20:00.001234+00:00",
   "hostname": "hpc-node-04.hpc.cz",
+  "agent_version": "77b680e",
   "events": [
     {
       "plugin": "agent_core_updater",
@@ -161,6 +162,7 @@ Sent immediately if one or more sub-modules detect a state mutation during the s
 {
   "timestamp": "2026-05-18T17:04:15.118942+00:00",
   "hostname": "hpc-node-04.hpc.cz",
+  "agent_version": "77b680e",
   "events": [
     {
       "plugin": "agent_services_monitor",
@@ -284,6 +286,8 @@ The monolithic agent execution block contains 25 built-in sub-modules. Each modu
     *   **suid_binaries:** Runs `find` over temp directories for SUID-root files (exploit staging artifacts).
     *   **suid_baseline:** Full-filesystem SUID/SGID inventory (single device, rescanned every 10 cycles). A newly appeared SUID/SGID binary triggers `CRITICAL` — LPE exploits and backdoored packages plant SUID shells for persistence. Removals are absorbed silently. The baseline persists across restarts.
     *   **auth_failures:** Reads `sudo`/`su` journal entries incrementally (persistent cursor). If authentication failures since the last cycle reach `security.sudo_fail_threshold` (default `3`), it triggers a `WARNING` with sample lines — a burst signals a privilege-escalation attempt.
+    *   **promisc_interfaces:** Reads the `IFF_PROMISC` flag (bit `0x100`) from `/sys/class/net/*/flags`. An interface in promiscuous mode (`WARNING`) usually means a packet sniffer is running.
+    *   **kernel_modules:** Baselines the loaded module set from `/proc/modules`. A newly loaded module triggers a `WARNING` — loadable kernel module (LKM) rootkits install themselves this way. Unloads are absorbed silently. The baseline persists across restarts.
 
 ### 23. `agent_security_kernel_cve`
 *   **Mechanism:** Parses `os.uname().release` into a `(major, minor, patch)` tuple and compares it against a static table of well-known, actively-abused local privilege escalation CVE ranges. Controlled by `security.scan_cves`.
