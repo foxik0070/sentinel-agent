@@ -3,6 +3,8 @@
 
 This document serves as the definitive technical reference for the Sentinel Agent subsystem. It describes the runtime architecture, stateful data filter pipeline, network wire-protocol mechanics, and exhaustive sub-module metrics criteria.
 
+> **Bezpečnostní vrstva:** podrobný popis ochrany před CVE a detekce podezřelého chování (model hrozby, jednotlivé detekce, omezení falešných poplachů) najdete v [`SECURITY.md`](SECURITY.md).
+
 ---
 
 ## 1. System Architecture Deep Dive
