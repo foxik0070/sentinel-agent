@@ -22,6 +22,7 @@ import subprocess
 import argparse
 import re
 import json
+import gzip
 import signal
 import hashlib
 import datetime
@@ -79,6 +80,9 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
 
         # API Connection Setup
         self.api_url = self.config['sentinel_api']['url'].rstrip('/')
+        if self.api_url.startswith('http://'):
+            print("[!] WARNING: Sentinel API URL is plaintext HTTP — the bearer token "
+                  "is sent unencrypted. Use https:// (see sentinel_api.verify_tls/ca_bundle).", flush=True)
         self.token = self.config['sentinel_api']['token']
         self.hostname = self.config['sentinel_api'].get('hostname', socket.gethostname())
         self.headers = {
@@ -372,6 +376,10 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
                 merged.append(evt)
             events = merged
 
+        api = self.config.get('sentinel_api', {})
+        if api.get('plain_messages', False):
+            events = [{**e, "message": self._plainify(e["message"])} for e in events]
+
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hostname": self.hostname,
@@ -379,12 +387,25 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             "events": events
         }
 
+        # TLS verification (#43): default on; optional custom CA bundle.
+        verify = api.get('ca_bundle') or api.get('verify_tls', True)
+
         try:
+            post_kwargs = {"timeout": 5, "verify": verify}
+            headers = dict(self.headers)
+            if api.get('gzip', False):
+                # Optional gzip of the JSON body (#44); server must accept
+                # Content-Encoding: gzip. Off by default for compatibility.
+                body = gzip.compress(json.dumps(payload).encode('utf-8'))
+                headers["Content-Encoding"] = "gzip"
+                post_kwargs["data"] = body
+            else:
+                post_kwargs["json"] = payload
+
             resp = self.session.post(
                 f"{self.api_url}/api/v1/agent/ingest",
-                headers=self.headers,
-                json=payload,
-                timeout=5
+                headers=headers,
+                **post_kwargs
             )
             resp.raise_for_status()
             self.pending_events = []
@@ -444,6 +465,22 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             print(f"[!] Config {CONFIG_FILE} missing required key(s): {', '.join(missing)}. "
                   f"Run sentinel_agent_init.py to regenerate it.", flush=True)
             sys.exit(1)
+
+    # Flowery filler -> plain wording for the optional plain_messages mode (#48).
+    _PLAIN_SUBS = [
+        (r"\s*configuration matrix", ""),
+        (r"\s*baseline matrix", " baseline"),
+        (r"\s*structural ", " "),
+        (r"\s*architecture ", " system "),
+        (r"\s*matrix\b", ""),
+        (r"\s{2,}", " "),
+    ]
+
+    def _plainify(self, msg):
+        out = msg
+        for pat, repl in self._PLAIN_SUBS:
+            out = re.sub(pat, repl, out)
+        return out.strip()
 
     def _sd_notify(self, state):
         """Best-effort sd_notify to systemd (READY/WATCHDOG/STOPPING). No-op when

@@ -1,0 +1,4 @@
+# Runtime dependencies for the Sentinel Agent.
+# Bounded to a known-good major to keep venv installs reproducible across hosts.
+requests>=2.31,<3
+PyYAML>=6.0,<7

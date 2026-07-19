@@ -329,12 +329,16 @@ agent_core:
 # Central Sentinel API Authorization Credentials
 # ==========================================================================
 sentinel_api:
-  url: http://192.168.1.100:5050
+  url: http://192.168.1.100:5050    # Use https:// so the bearer token is encrypted
   token: secure_agent_token_abc123
   hostname: myserver                # Logical name shown in dashboard — must be unique per host
   source_ip: ""                     # Bind outgoing requests to this IP (leave empty = automatic).
                                     # Set to eth0 IP when device has multiple interfaces to
                                     # prevent duplicate reports on the Sentinel server.
+  verify_tls: true                  # Verify the server TLS certificate (https only)
+  ca_bundle: ""                     # Path to a custom CA bundle (empty = system trust store)
+  gzip: false                       # gzip the JSON payload (server must accept Content-Encoding: gzip)
+  plain_messages: false             # Strip stylized filler ("matrix", "structural") from messages
 
 # ==========================================================================
 # Daemon Core Timing

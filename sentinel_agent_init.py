@@ -157,7 +157,11 @@ def load_existing_config():
             "url": "http://192.168.1.100:5050",
             "token": "",
             "hostname": socket.gethostname(),
-            "source_ip": ""
+            "source_ip": "",
+            "verify_tls": True,
+            "ca_bundle": "",
+            "gzip": False,
+            "plain_messages": False
         },
         "intervals": {
             "metrics_push_sec": 60,
@@ -310,9 +314,13 @@ def setup_agent_venv(working_dir):
     else:
         print(f"{C_GREEN}[+] Virtual environment already exists at {venv_dir}.{C_END}")
 
-    print(f"{C_BLUE}[*] Installing required modules (requests, pyyaml)...{C_END}")
+    print(f"{C_BLUE}[*] Installing required modules...{C_END}")
     try:
-        subprocess.run([pip_bin, "install", "requests", "pyyaml"], check=True, stdout=subprocess.DEVNULL)
+        req_file = os.path.join(working_dir, "requirements.txt")
+        if os.path.exists(req_file):
+            subprocess.run([pip_bin, "install", "-r", req_file], check=True, stdout=subprocess.DEVNULL)
+        else:
+            subprocess.run([pip_bin, "install", "requests>=2.31,<3", "PyYAML>=6.0,<7"], check=True, stdout=subprocess.DEVNULL)
         print(f"{C_GREEN}[+] Modules installed successfully.{C_END}")
     except subprocess.CalledProcessError as e:
         print(f"{C_FAIL}[!] Failed to install dependencies into venv: {e}{C_END}")

@@ -44,3 +44,14 @@ def test_self_resources_disabled_by_default(agent):
     agent.config = {"agent_core": {"max_self_rss_mb": 0}}
     # limit 0 -> disabled, must return without exiting
     agent._check_self_resources()
+
+
+def test_plainify_strips_filler(agent):
+    plain = agent._plainify("Service 'x' is back to normal configuration matrix.")
+    assert "matrix" not in plain
+    assert plain == "Service 'x' is back to normal."
+
+
+def test_plainify_leaves_plain_message_untouched(agent):
+    msg = "Storage path '/' re-attached successfully."
+    assert agent._plainify(msg) == msg
