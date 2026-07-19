@@ -68,7 +68,7 @@
 ## Kód / údržba
 
 46. 🟡 Rozdělit checky do plugin modulů (checks/*.py) — sentinel_agent.py má 1300+ řádků a poroste; registry pattern místo ručního seznamu v run_loop.
-47. 🟡 Unit testy pro parsovací logiku (who, smartctl, meminfo, revshell regexy) — pytest, fixture s reálnými výstupy.
+47. ✅ ~~Unit testy pro parsovací logiku~~ — HOTOVO: pytest sada (53 testů) - revshell vzory, CVE rozsahy, SMART sektory, RPi bitmask, OOM regex, retry buffer; běží bez configu a root. Zbývá: who/meminfo (vyžaduje extrakci z check metod).
 48. 🟢 Sjednotit stylizované hlášky („matrix", „structural") — volitelně plain-english režim pro čitelnost.
 49. 🟢 requirements.txt + pin verzí pro venv (teď se instaluje latest requests/pyyaml).
 50. 🟢 CI na Gitea (actions): py_compile + testy na push — ochrana před rozbitím git auto-update mechanismu (souvisí s #23).

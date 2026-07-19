@@ -483,3 +483,17 @@ sudo systemctl restart sentinel-agent
 # Stream live daemon logs
 sudo journalctl -u sentinel-agent.service -f --output cat
 ```
+
+### Testing
+
+The parsing/decoding logic (reverse-shell patterns, kernel CVE ranges, SMART
+sector attributes, RPi throttle bitmask, OOM regex, retry buffer) is covered by
+a pytest suite that runs without a config file or root privileges:
+
+```bash
+pip install -r requirements-dev.txt
+python3 -m pytest        # 53 tests
+```
+
+These tests guard the git auto-update mechanism: a logic regression that would
+otherwise be pulled and self-restarted into a broken agent is caught here first.
