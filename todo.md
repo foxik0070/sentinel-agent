@@ -61,14 +61,14 @@
 ## Server / protokol
 
 42. ✅ ~~Agent → server: verze agenta (git SHA) v payloadu~~ — HOTOVO: `agent_version` v každém payloadu, server vidí uzly na staré verzi.
-43. 🟡 HTTPS + ověření certifikátu pro komunikaci se serverem (teď plaintext HTTP token).
-44. 🟡 Komprese payloadu / batching při velkém počtu eventů.
-45. 🟢 Endpoint `/api/v1/agent/config` — centrální distribuce konfigurace z Ansible/serveru místo ruční editace na každém uzlu.
+43. ✅ ~~HTTPS + ověření certifikátu~~ — HOTOVO: verify_tls (default True) + ca_bundle, varování při plaintext http:// URL.
+44. ✅ ~~Komprese payloadu~~ — HOTOVO: opt-in sentinel_api.gzip (Content-Encoding: gzip); server musí gzip přijmout. Batching (eventy v jednom requestu) už existuje.
+45. ⏸️ Endpoint `/api/v1/agent/config` — ODLOŽENO: vyžaduje serverovou implementaci (agent-side nemá smysl bez endpointu). Budoucí práce na straně Sentinel serveru.
 
 ## Kód / údržba
 
 46. ✅ ~~Rozdělit checky do plugin modulů (checks/*.py)~~ — HOTOVO: mixin moduly (services/security/storage/kernel/system), @register_check registry místo ručního seznamu v run_loop; compile guard rozšířen na compileall celého balíku. Pořadí i funkčnost identické (ověřeno pytest + živý cyklus).
 47. ✅ ~~Unit testy pro parsovací logiku~~ — HOTOVO: pytest sada (53 testů) - revshell vzory, CVE rozsahy, SMART sektory, RPi bitmask, OOM regex, retry buffer; běží bez configu a root. Zbývá: who/meminfo (vyžaduje extrakci z check metod).
-48. 🟢 Sjednotit stylizované hlášky („matrix", „structural") — volitelně plain-english režim pro čitelnost.
-49. 🟢 requirements.txt + pin verzí pro venv (teď se instaluje latest requests/pyyaml).
+48. ✅ ~~Plain-english režim hlášek~~ — HOTOVO: opt-in sentinel_api.plain_messages, _plainify odstraní stylizovaný filler při odesílání (delta filtr běží na originálech).
+49. ✅ ~~requirements.txt + pin verzí~~ — HOTOVO: requirements.txt (requests>=2.31,<3, PyYAML>=6,<7), init i CI instalují z něj.
 50. ✅ ~~CI na Gitea (actions)~~ — HOTOVO: `.gitea/workflows/ci.yaml` spouští py_compile + pytest na push do main a PR. Vyžaduje registrovaný act_runner s labelem ubuntu-latest (Python 3 + Node.js).
