@@ -18,15 +18,15 @@
 12. ✅ ~~Kontrola immutable flagu~~ — HOTOVO: check_immutable_flags, lsattr na tmp + persistence soubory, WARNING na chattr +i.
 13. ✅ ~~Detekce raw socketů~~ — HOTOVO: check_raw_sockets, /proc/net/raw(6) mapované na PID, allowlist démonů, opt-in (monitor_raw_sockets).
 14. ✅ ~~Whitelist pro suspicious-process check~~ — HOTOVO: config suspicious_ignore, přeskočí procesy dle substringu v cmdline.
-15. 🟢 Volitelná integrace `debsums`/`rpm -V` pro ověření integrity systémových balíků (týdenní cadence).
+15. ✅ ~~Integrace debsums/rpm -V~~ — HOTOVO: check_package_integrity, týdenní cadence, WARNING na změněné systémové soubory; opt-in (pkg_integrity).
 
 ## Bezpečnost — CVE / aktualizace
 
 16. ✅ ~~Vypsat konkrétní CVE/balíky v hlášení o security updatech~~ — HOTOVO: prvních 10 balíků v CRITICAL hlášce (apt i dnf).
 17. ✅ ~~Kontrola verze kernelu proti známým lokálním eskalacím~~ — HOTOVO: `check_kernel_cves` (Dirty COW, OverlayFS, Dirty Pipe, nf_tables UAF). Rozšiřovat tabulku KERNEL_LPE_CVES o nové CVE.
 18. ✅ ~~Alert na pending reboot~~ — HOTOVO: /var/run/reboot-required + výpis balíků, které ho vyvolaly.
-19. 🟢 Podpora `needrestart` — detekce služeb běžících se starými (opatchovanými) knihovnami.
-20. 🟢 Volitelný `unattended-upgrades` status check — hlásit, když automatické security aktualizace selhávají.
+19. ✅ ~~Podpora needrestart~~ — HOTOVO: check_needrestart, WARNING na služby s neaktuálními knihovnami; opt-in (check_needrestart).
+20. ✅ ~~unattended-upgrades status~~ — HOTOVO: check_unattended_upgrades, WARNING při chybách nebo stagnaci (>14 dní); opt-in.
 
 ## Spolehlivost agenta
 

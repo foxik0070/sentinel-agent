@@ -636,6 +636,123 @@ class SecurityChecks:
 
         return events
 
+    @register_check(41)
+    def check_package_integrity(self):
+        """Verifies installed system packages against their manifest checksums
+        (debsums / rpm -V). Heavy, so it runs on a configurable cadence (todo #15)."""
+        events = []
+        sec = self.config.get('checks', {}).get('security', {})
+        if not sec.get('pkg_integrity', False):
+            return events
+        cadence = sec.get('pkg_integrity_cadence_cycles', 10080)  # ~weekly at 60s
+        if not hasattr(self, 'pkg_integrity_counter'):
+            self.pkg_integrity_counter = 0
+        run_now = self.pkg_integrity_counter % cadence == 0
+        self.pkg_integrity_counter += 1
+        if not run_now:
+            return events
+
+        modified = []
+        try:
+            if self.os_family == "debian":
+                proc = subprocess.run(["debsums", "-c"], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, text=True, timeout=600)
+                modified = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+            elif self.os_family == "rhel":
+                proc = subprocess.run(["rpm", "-Va", "--nomtime", "--nordev"], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, text=True, timeout=600)
+                # only flag checksum (5) mismatches on binaries, not config files (c)
+                modified = [l for l in proc.stdout.splitlines()
+                            if l and l[0:9].find('5') != -1 and ' c ' not in l]
+        except FileNotFoundError:
+            return events  # debsums/rpm not installed
+        except Exception as e:
+            print(f"[-] Package integrity check failure: {e}", flush=True)
+            return events
+
+        state_key = "security:pkg_integrity"
+        current_status = "WARNING" if modified else "OK"
+        msg = (f"System package files modified vs. distribution manifest ({len(modified)}): {', '.join(modified[:10])}{'...' if len(modified) > 10 else ''}"
+               if modified else "Installed system package files match distribution manifest.")
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_security_package_integrity",
+                "target": "packages",
+                "status": current_status,
+                "message": msg,
+            })
+        return events
+
+    @register_check(42)
+    def check_needrestart(self):
+        """Detects services running with old (already-patched) libraries still
+        mapped in memory - the patch is installed but not effective (todo #19)."""
+        events = []
+        if not self.config.get('checks', {}).get('security', {}).get('check_needrestart', False):
+            return events
+        try:
+            proc = subprocess.run(["needrestart", "-b"], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, timeout=60)
+        except FileNotFoundError:
+            return events
+        except Exception as e:
+            print(f"[-] needrestart check failure: {e}", flush=True)
+            return events
+
+        svcs = re.findall(r"NEEDRESTART-SVC:\s*(\S+)", proc.stdout)
+        svc_count = len(svcs)
+        state_key = "security:needrestart"
+        current_status = "WARNING" if svc_count > 0 else "OK"
+        msg = (f"{svc_count} service(s) still running old libraries after an update - restart them so the patch takes effect: {', '.join(svcs[:10])}"
+               if svc_count else "No services running outdated libraries.")
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_security_needrestart",
+                "target": "services",
+                "status": current_status,
+                "message": msg,
+            })
+        return events
+
+    @register_check(43)
+    def check_unattended_upgrades(self):
+        """Alerts when automatic security updates (unattended-upgrades) are failing
+        or stale, so a node does not silently stop patching itself (todo #20)."""
+        events = []
+        if not self.config.get('checks', {}).get('security', {}).get('check_unattended_upgrades', False):
+            return events
+        if self.os_family != "debian":
+            return events
+        log = "/var/log/unattended-upgrades/unattended-upgrades.log"
+        if not os.path.exists(log):
+            return events
+        state_key = "security:unattended_upgrades"
+        try:
+            import time as _time
+            age_days = (_time.time() - os.path.getmtime(log)) / 86400
+            tail = subprocess.run(["tail", "-n", "50", log], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, timeout=10).stdout
+            failed = re.search(r"(ERROR|Traceback|failed to|Exception)", tail, re.IGNORECASE)
+            if failed:
+                current_status = "WARNING"
+                msg = "Automatic security updates (unattended-upgrades) are reporting errors - node may not be patching itself."
+            elif age_days > 14:
+                current_status = "WARNING"
+                msg = f"unattended-upgrades has not run for {age_days:.0f} days - automatic patching may be stalled."
+            else:
+                current_status = "OK"
+                msg = "Automatic security updates running normally."
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_unattended_upgrades",
+                    "target": "auto_updates",
+                    "status": current_status,
+                    "message": msg,
+                })
+        except Exception as e:
+            print(f"[-] unattended-upgrades check failure: {e}", flush=True)
+        return events
+
     # Remote ports strongly associated with reverse shells and mining pools.
     SUSPICIOUS_REMOTE_PORTS = {
         "1337", "3333", "4028", "4040", "4444", "4445", "5555", "6666",
