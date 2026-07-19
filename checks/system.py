@@ -165,6 +165,72 @@ class SystemChecks:
                                "status": current_status, "message": msg})
         return events
 
+    @register_check(86)
+    def check_fan_speed(self):
+        """Reads hwmon fan tachometers; a fan reading 0 RPM while present means a
+        stopped/failed fan and imminent overheating (todo #40)."""
+        events = []
+        if not self.config.get('checks', {}).get('hardware', {}).get('monitor_fans', False):
+            return events
+        stopped = []
+        present = 0
+        try:
+            for hw in os.listdir('/sys/class/hwmon'):
+                base = f"/sys/class/hwmon/{hw}"
+                for entry in os.listdir(base):
+                    m = re.match(r'^fan(\d+)_input$', entry)
+                    if not m:
+                        continue
+                    present += 1
+                    try:
+                        with open(os.path.join(base, entry)) as f:
+                            rpm = int(f.read().strip())
+                        if rpm == 0:
+                            stopped.append(f"{hw}/fan{m.group(1)}")
+                    except Exception:
+                        continue
+        except Exception:
+            return events
+        if present == 0:
+            return events  # no tachometer-reporting fans on this host
+        state_key = "hardware:fans"
+        current_status = "WARNING" if stopped else "OK"
+        msg = (f"Fan(s) reporting 0 RPM (stopped/failed, overheating risk): {', '.join(stopped)}"
+               if stopped else f"All {present} monitored fan(s) spinning.")
+        if self.should_report(state_key, msg):
+            events.append({"plugin": "agent_fan_monitor", "target": "fans",
+                           "status": current_status, "message": msg})
+        return events
+
+    @register_check(87)
+    def check_readonly_remount(self):
+        """Detects a filesystem that has been remounted read-only - on a Pi this is
+        the classic symptom of a dying SD card (todo #41)."""
+        events = []
+        if not self.config.get('checks', {}).get('hardware', {}).get('monitor_readonly_remount', True):
+            return events
+        watch = self.config.get('checks', {}).get('hardware', {}).get('readonly_mounts', ['/'])
+        ro_found = []
+        try:
+            with open('/proc/mounts', 'r') as f:
+                mounts = f.readlines()
+        except Exception:
+            return events
+        for line in mounts:
+            parts = line.split()
+            if len(parts) >= 4 and parts[1] in watch:
+                opts = parts[3].split(',')
+                if 'ro' in opts:
+                    ro_found.append(parts[1])
+        state_key = "hardware:readonly_remount"
+        current_status = "CRITICAL" if ro_found else "OK"
+        msg = (f"Filesystem(s) remounted READ-ONLY (likely failing SD card / disk): {', '.join(ro_found)}"
+               if ro_found else "Monitored filesystems are read-write.")
+        if self.should_report(state_key, msg):
+            events.append({"plugin": "agent_filesystem_readonly_monitor", "target": "mounts",
+                           "status": current_status, "message": msg})
+        return events
+
     @register_check(85)
     def check_ups_nut(self):
         """UPS status via NUT (upsc): on-battery / low-battery / charge (todo #35)."""

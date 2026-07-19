@@ -168,7 +168,7 @@ def load_existing_config():
             "services": [],
             "mounts": [],
             "temperature": {"enabled": True, "warning": 75.0, "critical": 85.0},
-            "hardware": {"monitor_rpi_throttling": True, "nut_ups": ""},
+            "hardware": {"monitor_rpi_throttling": True, "nut_ups": "", "monitor_fans": False, "monitor_readonly_remount": True, "readonly_mounts": ["/"]},
             "storage": {"enabled": True, "paths": ["/"], "warn_percent": 85, "crit_percent": 95, "monitor_wearout": True, "monitor_raid": True, "monitor_disk_health": False},
             "memory": {"enabled": True, "warn_percent": 85, "crit_percent": 95, "monitor_swap": True},
             "kernel": {"monitor_oom": True, "monitor_zombies": True, "max_zombies": 5, "monitor_io_hangs": True, "monitor_taint": True},

@@ -55,8 +55,8 @@
 
 38. ✅ ~~Raspberry Pi vcgencmd get_throttled~~ — HOTOVO: `agent_rpi_power_monitor`, undervoltage NOW = CRITICAL, ostatní + historie od bootu = WARNING; auto-skip mimo RPi.
 39. ✅ ~~SMART reallocated/pending sektory~~ — HOTOVO: parsuje Reallocated/Pending/Uncorrectable (SATA) + Media/Data Integrity Errors (NVMe), CRITICAL na nenulový počet.
-40. 🟢 Monitoring otáček ventilátorů z hwmon (kde existují).
-41. 🟢 SD karta na RPi: detekce read-only remountu filesystému (typická smrt SD karty).
+40. ✅ ~~Monitoring otáček ventilátorů~~ — HOTOVO: check_fan_speed, hwmon fanN_input, WARNING na 0 RPM (opt-in monitor_fans).
+41. ✅ ~~Detekce read-only remountu~~ — HOTOVO: check_readonly_remount, /proc/mounts, CRITICAL na ro remount (default zap, typická smrt SD karty).
 
 ## Server / protokol
 
