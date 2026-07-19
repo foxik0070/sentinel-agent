@@ -67,7 +67,7 @@
 
 ## Kód / údržba
 
-46. 🟡 Rozdělit checky do plugin modulů (checks/*.py) — sentinel_agent.py má 1300+ řádků a poroste; registry pattern místo ručního seznamu v run_loop.
+46. ✅ ~~Rozdělit checky do plugin modulů (checks/*.py)~~ — HOTOVO: mixin moduly (services/security/storage/kernel/system), @register_check registry místo ručního seznamu v run_loop; compile guard rozšířen na compileall celého balíku. Pořadí i funkčnost identické (ověřeno pytest + živý cyklus).
 47. ✅ ~~Unit testy pro parsovací logiku~~ — HOTOVO: pytest sada (53 testů) - revshell vzory, CVE rozsahy, SMART sektory, RPi bitmask, OOM regex, retry buffer; běží bez configu a root. Zbývá: who/meminfo (vyžaduje extrakci z check metod).
 48. 🟢 Sjednotit stylizované hlášky („matrix", „structural") — volitelně plain-english režim pro čitelnost.
 49. 🟢 requirements.txt + pin verzí pro venv (teď se instaluje latest requests/pyyaml).

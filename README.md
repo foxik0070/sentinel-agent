@@ -500,11 +500,32 @@ otherwise be pulled and self-restarted into a broken agent is caught here first.
 
 ### Continuous Integration (Gitea Actions)
 
-`.gitea/workflows/ci.yaml` runs the compile check and the pytest suite on every
-push to `main` and on pull requests. This closes the loop on the auto-update
-mechanism — a broken commit is caught by CI before agents can pull it.
+`.gitea/workflows/ci.yaml` runs the compile check (`compileall` over the agent
+and the `checks/` package) and the pytest suite on every push to `main` and on
+pull requests. This closes the loop on the auto-update mechanism — a broken
+commit is caught by CI before agents can pull it.
 
-**Runner requirement:** the pipeline needs a registered Gitea Actions runner
-(`act_runner`) labelled `ubuntu-latest` whose base image provides Python 3 and
-Node.js (e.g. `catthehacker/ubuntu:act-*`). If Actions are not yet enabled for
-the repository, turn them on in *Settings → Actions* and register a runner.
+The pipeline runs on the same registered `act_runner` (label `ubuntu-latest`)
+already serving the central Sentinel server repository, and uses
+`actions/setup-python@v5` so it does not depend on the runner base image
+shipping a specific Python version.
+
+## Project layout
+
+```text
+sentinel_agent.py        # core: config, state, HTTP push, git auto-update, run_loop
+sentinel_agent_init.py   # interactive installer / systemd deployment
+checks/
+  __init__.py            # @register_check registry (ordered run_loop discovery)
+  services.py            # ServicesChecks  — systemd services, mountpoints
+  security.py            # SecurityChecks  — ports, root logins, CVE, suspicious activity, SSL
+  storage.py             # StorageChecks   — capacity, RAID, SSD wearout, SMART
+  kernel.py              # KernelChecks    — OOM, zombies, I/O hangs, taint
+  system.py              # SystemChecks    — temperature, RPi throttling, time, DNS, memory
+tests/                   # pytest suite (runs without config or root)
+```
+
+The check mixins are composed onto `SentinelAgent` by inheritance, so every
+check shares `self.config`, `self.should_report`, and the persisted baselines
+unchanged. Adding a check is a decorated method in the relevant mixin — no edit
+to `run_loop`.

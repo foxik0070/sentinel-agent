@@ -13,20 +13,19 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Show Python version
-        run: python3 --version
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --upgrade pip
+          python -m pip install --upgrade pip
           # runtime deps (imported at module load) + test runner
           pip install requests pyyaml pytest
 
       - name: Syntax / compile check
-        run: python3 -m py_compile sentinel_agent.py sentinel_agent_init.py
+        run: python -m compileall -q sentinel_agent.py sentinel_agent_init.py checks/
 
       - name: Unit tests
-        run: python3 -m pytest
+        run: python -m pytest tests/ -q --tb=short
