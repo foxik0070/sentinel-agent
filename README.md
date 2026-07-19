@@ -497,3 +497,14 @@ python3 -m pytest        # 53 tests
 
 These tests guard the git auto-update mechanism: a logic regression that would
 otherwise be pulled and self-restarted into a broken agent is caught here first.
+
+### Continuous Integration (Gitea Actions)
+
+`.gitea/workflows/ci.yaml` runs the compile check and the pytest suite on every
+push to `main` and on pull requests. This closes the loop on the auto-update
+mechanism — a broken commit is caught by CI before agents can pull it.
+
+**Runner requirement:** the pipeline needs a registered Gitea Actions runner
+(`act_runner`) labelled `ubuntu-latest` whose base image provides Python 3 and
+Node.js (e.g. `catthehacker/ubuntu:act-*`). If Actions are not yet enabled for
+the repository, turn them on in *Settings → Actions* and register a runner.

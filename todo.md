@@ -71,4 +71,4 @@
 47. ✅ ~~Unit testy pro parsovací logiku~~ — HOTOVO: pytest sada (53 testů) - revshell vzory, CVE rozsahy, SMART sektory, RPi bitmask, OOM regex, retry buffer; běží bez configu a root. Zbývá: who/meminfo (vyžaduje extrakci z check metod).
 48. 🟢 Sjednotit stylizované hlášky („matrix", „structural") — volitelně plain-english režim pro čitelnost.
 49. 🟢 requirements.txt + pin verzí pro venv (teď se instaluje latest requests/pyyaml).
-50. 🟢 CI na Gitea (actions): py_compile + testy na push — ochrana před rozbitím git auto-update mechanismu (souvisí s #23).
+50. ✅ ~~CI na Gitea (actions)~~ — HOTOVO: `.gitea/workflows/ci.yaml` spouští py_compile + pytest na push do main a PR. Vyžaduje registrovaný act_runner s labelem ubuntu-latest (Python 3 + Node.js).
