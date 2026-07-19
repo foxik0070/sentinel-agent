@@ -22,6 +22,7 @@ import subprocess
 import argparse
 import re
 import json
+import signal
 import hashlib
 import datetime
 from datetime import datetime, timezone
@@ -73,7 +74,9 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             
         with open(CONFIG_FILE, 'r') as stream:
             self.config = yaml.safe_load(stream)
-            
+
+        self._validate_config()
+
         # API Connection Setup
         self.api_url = self.config['sentinel_api']['url'].rstrip('/')
         self.token = self.config['sentinel_api']['token']
@@ -425,6 +428,114 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
         }]
         self.push_to_sentinel(events_resolved)
 
+    def _validate_config(self):
+        """Fails fast with a clear message on a malformed config instead of a
+        cryptic KeyError deep in a check (todo #29)."""
+        if not isinstance(self.config, dict):
+            print(f"[!] Config root of {CONFIG_FILE} is not a mapping. Aborting.", flush=True)
+            sys.exit(1)
+        missing = []
+        api = self.config.get('sentinel_api')
+        if not isinstance(api, dict) or not api.get('url'):
+            missing.append('sentinel_api.url')
+        if not isinstance(api, dict) or not api.get('token'):
+            missing.append('sentinel_api.token')
+        if missing:
+            print(f"[!] Config {CONFIG_FILE} missing required key(s): {', '.join(missing)}. "
+                  f"Run sentinel_agent_init.py to regenerate it.", flush=True)
+            sys.exit(1)
+
+    def _sd_notify(self, state):
+        """Best-effort sd_notify to systemd (READY/WATCHDOG/STOPPING). No-op when
+        not run under a systemd notify unit (todo #25)."""
+        addr = os.environ.get('NOTIFY_SOCKET')
+        if not addr:
+            return
+        try:
+            if addr.startswith('@'):
+                addr = '\0' + addr[1:]
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            sock.connect(addr)
+            sock.sendall(state.encode())
+            sock.close()
+        except Exception:
+            pass
+
+    def _reload_config(self, signum, frame):
+        """SIGHUP handler: reload check thresholds without a restart. Connection
+        settings (url/token) still require a restart (todo #28)."""
+        try:
+            with open(CONFIG_FILE, 'r') as stream:
+                self.config = yaml.safe_load(stream)
+            self._validate_config()
+            print(f"[{datetime.now().isoformat()}] Config reloaded via SIGHUP.", flush=True)
+        except Exception as e:
+            print(f"[-] SIGHUP config reload failed (keeping old config): {e}", flush=True)
+
+    def _check_self_resources(self):
+        """Self-restart if the agent's own RSS exceeds a configured limit, letting
+        systemd restart it clean (guards against slow leaks) (todo #26)."""
+        limit_mb = self.config.get('agent_core', {}).get('max_self_rss_mb', 0)
+        if not limit_mb:
+            return
+        try:
+            with open('/proc/self/status', 'r') as f:
+                for line in f:
+                    if line.startswith('VmRSS:'):
+                        rss_mb = int(line.split()[1]) / 1024
+                        if rss_mb > limit_mb:
+                            print(f"[!] Agent RSS {rss_mb:.0f}MB exceeds limit {limit_mb}MB — "
+                                  f"exiting for a clean systemd restart.", flush=True)
+                            self._sd_notify("STOPPING=1")
+                            sys.exit(0)
+                        break
+        except Exception:
+            pass
+
+    def run_cycle(self):
+        """Runs every registered check once and returns the collected events."""
+        events = []
+        for check_name in registered_check_names():
+            events.extend(getattr(self, check_name)())
+        return events
+
+    def _apply_and_push(self, events):
+        """Updates the active-issue registry, persists state, and pushes deltas
+        plus re-affirmations of still-active issues."""
+        for evt in events:
+            issue_key = f"{evt['plugin']}:{evt['target']}"
+            if evt['status'] == 'OK':
+                self.active_issues.pop(issue_key, None)
+            else:
+                self.active_issues[issue_key] = {
+                    'status': evt['status'],
+                    'message': evt['message'],
+                    'target': evt['target'],
+                    'plugin': evt['plugin'],
+                    'updated': datetime.now(timezone.utc).isoformat()
+                }
+        self._save_state()
+
+        push_events = list(events)
+        _delta_keys = {f"{e['plugin']}:{e['target']}" for e in events}
+        for _k, _info in self.active_issues.items():
+            if _k not in _delta_keys:
+                push_events.append({
+                    "plugin": _info['plugin'],
+                    "target": _info['target'],
+                    "status": _info['status'],
+                    "message": _info['message'],
+                })
+        self.push_to_sentinel(push_events)
+
+    def run_dry(self):
+        """Runs all checks once and prints the resulting events as JSON without
+        touching the server or the state file (todo #30)."""
+        events = self.run_cycle()
+        print(json.dumps(events, indent=2))
+        print(f"\n[dry-run] {len(events)} event(s) from {len(registered_check_names())} checks. "
+              f"Nothing pushed, state file untouched.", flush=True)
+
     def run_loop(self):
         if self.fast_mode:
             boot_delay = 5
@@ -435,6 +546,13 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             interval = self.config.get('intervals', {}).get('metrics_push_sec', 60)
             print(f"[*] Enforcing system stabilization grace period ({boot_delay}s). Waiting for OS layers to settle...", flush=True)
             
+        # Notify systemd we are up (Type=notify units) and install SIGHUP reload.
+        self._sd_notify("READY=1")
+        try:
+            signal.signal(signal.SIGHUP, self._reload_config)
+        except (ValueError, OSError):
+            pass  # not in main thread / unsupported platform
+
         time.sleep(boot_delay)
 
         print(f"Starting Stateful Sentinel Agent on {self.hostname}. Cadence: {interval}s.", flush=True)
@@ -446,52 +564,18 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             "message": "Agent service successfully started and running clean."
         }]
         self.push_to_sentinel(boot_event)
-        
+
         while True:
             try:
                 self.check_for_git_updates()
-                
-                events = []
-                # Checks run in the order registered via @register_check across the
-                # checks/* mixin modules (see checks/__init__.py).
-                for check_name in registered_check_names():
-                    events.extend(getattr(self, check_name)())
-
-                # Update active issue registry from this cycle's deltas FIRST.
-                for evt in events:
-                    issue_key = f"{evt['plugin']}:{evt['target']}"
-                    if evt['status'] == 'OK':
-                        self.active_issues.pop(issue_key, None)
-                    else:
-                        self.active_issues[issue_key] = {
-                            'status': evt['status'],
-                            'message': evt['message'],
-                            'target': evt['target'],
-                            'plugin': evt['plugin'],
-                            'updated': datetime.now(timezone.utc).isoformat()
-                        }
-                self._save_state()
-
-                # Re-affirm ALL currently-active issues every cycle. The central server
-                # auto-resolves AGENT issues absent from a report after a few cycles
-                # (missing_count threshold), so a delta-only push made still-active
-                # issues vanish — and a server restart "forgot" them entirely. OK
-                # transitions stay in `events` so resolutions still propagate.
-                push_events = list(events)
-                _delta_keys = {f"{e['plugin']}:{e['target']}" for e in events}
-                for _k, _info in self.active_issues.items():
-                    if _k not in _delta_keys:
-                        push_events.append({
-                            "plugin": _info['plugin'],
-                            "target": _info['target'],
-                            "status": _info['status'],
-                            "message": _info['message'],
-                        })
-                self.push_to_sentinel(push_events)
-
+                # Re-affirmation of still-active issues happens inside _apply_and_push;
+                # the central server auto-resolves AGENT issues absent from a report.
+                self._apply_and_push(self.run_cycle())
+                self._check_self_resources()
+                self._sd_notify("WATCHDOG=1")
             except Exception as loop_err:
                 print(f"[{datetime.now().isoformat()}] Internal runtime processing loop error: {loop_err}", flush=True)
-                
+
             time.sleep(interval)
 
 if __name__ == "__main__":
@@ -499,11 +583,14 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="Send a test delta execution and exit")
     parser.add_argument("--fast", action="store_true", help="Run loop with 5s boot delay and 5s interval for quick manual testing")
     parser.add_argument("--issues", action="store_true", help="Print active issues from state file and exit")
+    parser.add_argument("--dry-run", action="store_true", help="Run all checks once, print events as JSON, push nothing")
     args = parser.parse_args()
 
     agent = SentinelAgent(fast_mode=args.fast)
     if args.issues:
         agent.print_issues()
+    elif args.dry_run:
+        agent.run_dry()
     elif args.test:
         agent.send_test_issue()
     else:

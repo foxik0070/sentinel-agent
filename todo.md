@@ -34,12 +34,12 @@
 22. ✅ ~~Retry fronta pro push_to_sentinel~~ — HOTOVO: buffer s dedupem, persistence přes restart, cap `max_pending_events` (500), replay při obnovení spojení.
 23. ✅ ~~Git auto-update: py_compile před restartem~~ — HOTOVO: rozbité commity se rollbacknou a nahlásí CRITICAL místo suicide restartu.
 24. ✅ ~~Timeout u všech subprocess.run volání~~ — HOTOVO: 10–120 s podle nástroje (smartctl 30 s, apt/dnf 120 s).
-25. 🟡 Watchdog integrace se systemd (`WatchdogSec` + `sd_notify`) — detekce zamrzlého agenta.
-26. 🟡 Hlídat vlastní paměť/CPU agenta a self-restart při překročení limitu.
+25. ✅ ~~Watchdog integrace se systemd~~ — HOTOVO: sd_notify READY/WATCHDOG/STOPPING, unit Type=notify + WatchdogSec=1200; no-op mimo systemd.
+26. ✅ ~~Self-resource watch + restart~~ — HOTOVO: _check_self_resources, self-exit při RSS > max_self_rss_mb (0=vyp), systemd restartuje čistě.
 27. ✅ ~~OOM přes journal kursor~~ — HOTOVO: `journalctl -k --cursor-file` (přesné, přežije rotaci bufferu i restart agenta), dmesg fallback pro non-systemd.
-28. 🟢 Config reload na SIGHUP bez restartu služby.
-29. 🟢 Validace config schématu při startu (chybějící klíč → srozumitelná chyba místo KeyError).
-30. 🟢 `--dry-run` režim: proveď všechny checky, vypiš eventy na stdout, nic neposílej.
+28. ✅ ~~Config reload na SIGHUP~~ — HOTOVO: SIGHUP handler reloaduje thresholdy (url/token vyžadují restart).
+29. ✅ ~~Validace configu při startu~~ — HOTOVO: _validate_config, srozumitelná chyba + exit místo KeyError.
+30. ✅ ~~--dry-run režim~~ — HOTOVO: proveď všechny checky, vypiš eventy JSON, nic nepushne, state netknutý.
 
 ## Síť / infrastruktura — nové checky
 

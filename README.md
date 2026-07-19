@@ -323,6 +323,7 @@ agent_core:
                                   # the retry buffer across agent restarts (port baseline
                                   # intentionally resets).
   max_pending_events: 500         # Retry buffer cap for events from failed pushes
+  max_self_rss_mb: 0              # Self-restart if agent RSS exceeds this many MB (0 = disabled)
 
 # ==========================================================================
 # Central Sentinel API Authorization Credentials
@@ -444,7 +445,9 @@ After=network-online.target multi-user.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=1200
 WorkingDirectory=/etc/sentinel
 ExecStart=/usr/bin/env python3 /usr/local/bin/sentinel_agent.py
 Restart=always
@@ -471,8 +474,14 @@ python3 sentinel_agent.py --test
 # Print active issues from state file (same as agent_issues, useful outside venv)
 python3 sentinel_agent.py --issues
 
+# Run every check once, print events as JSON, push nothing (safe preview)
+python3 sentinel_agent.py --dry-run
+
 # Run with 5s intervals for manual testing
 python3 sentinel_agent.py --fast
+
+# Reload check thresholds without restarting (connection settings need a restart)
+sudo systemctl kill -s HUP sentinel-agent
 
 # Force reload of unit configuration after manual edits
 sudo systemctl daemon-reload

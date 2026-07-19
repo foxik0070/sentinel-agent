@@ -149,7 +149,9 @@ def load_existing_config():
     default_config = {
         "agent_core": {
             "git_auto_update": False,
-            "state_file": "/var/lib/sentinel/state.json"
+            "state_file": "/var/lib/sentinel/state.json",
+            "max_pending_events": 500,
+            "max_self_rss_mb": 0
         },
         "sentinel_api": {
             "url": "http://192.168.1.100:5050",
@@ -392,7 +394,9 @@ After=network-online.target multi-user.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=1200
 WorkingDirectory={working_dir}
 ExecStart={python_exec} {bin_path}
 Restart=always
