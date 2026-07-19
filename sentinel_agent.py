@@ -120,6 +120,10 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
         # --- Kernel Module Baseline (rootkit detection) ---
         self.module_baseline = set()
         self.module_baseline_initialized = False
+
+        # --- Privileged Group Membership Baseline ---
+        self.priv_groups_baseline = {}
+        self.priv_groups_initialized = False
         self.state_file = self.config.get('agent_core', {}).get('state_file', '/var/lib/sentinel/state.json')
 
         # --- HTTP Session (optional source IP binding to prevent multi-IP duplicates) ---
@@ -158,6 +162,9 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             if baselines.get('kernel_modules'):
                 self.module_baseline = set(baselines['kernel_modules'])
                 self.module_baseline_initialized = True
+            if baselines.get('priv_groups'):
+                self.priv_groups_baseline = {g: set(m) for g, m in baselines['priv_groups'].items()}
+                self.priv_groups_initialized = True
             print(f"[*] Restored persisted state: {len(self.active_issues)} active issues, "
                   f"{len(self.last_reported_states)} reported states, integrity baselines "
                   f"{'restored' if self.critical_files_initialized else 'fresh'}.", flush=True)
@@ -315,7 +322,8 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
                         "critical_files": self.critical_file_hashes,
                         "persistence_files": self.persistence_file_hashes,
                         "suid_files": sorted(self.suid_baseline),
-                        "kernel_modules": sorted(self.module_baseline)
+                        "kernel_modules": sorted(self.module_baseline),
+                        "priv_groups": {g: sorted(m) for g, m in self.priv_groups_baseline.items()}
                     }
                 }, f, indent=2)
         except Exception as e:

@@ -327,6 +327,9 @@ class SecurityChecks:
     def _scan_suspicious_processes(self):
         """Walks /proc for processes executing from tmp dirs, known miners and reverse-shell patterns."""
         findings = []
+        # User-defined allowlist of substrings; a process whose cmdline or exe
+        # matches is skipped (e.g. a legitimate CI runner script under /tmp).
+        ignore = self.config.get('checks', {}).get('security', {}).get('suspicious_ignore', [])
         for pid in os.listdir('/proc'):
             if not pid.isdigit() or int(pid) == os.getpid():
                 continue
@@ -338,6 +341,8 @@ class SecurityChecks:
                     cmdline = f.read().replace(b'\x00', b' ').decode(errors='replace').strip()
             except Exception:
                 continue  # process vanished mid-scan
+            if any(pat and pat in cmdline for pat in ignore):
+                continue
             try:
                 exe = os.readlink(f"{base}/exe")
             except Exception:
@@ -629,6 +634,206 @@ class SecurityChecks:
         except Exception as e:
             print(f"[-] Kernel module baseline check failure: {e}", flush=True)
 
+        return events
+
+    # Remote ports strongly associated with reverse shells and mining pools.
+    SUSPICIOUS_REMOTE_PORTS = {
+        "1337", "3333", "4028", "4040", "4444", "4445", "5555", "6666",
+        "6667", "7777", "9999", "14444", "14433", "45560",
+    }
+
+    @register_check(46)
+    def check_outbound_connections(self):
+        """Flags established outbound TCP connections to ports associated with
+        reverse shells / mining pools (todo #7)."""
+        events = []
+        sec = self.config.get('checks', {}).get('security', {})
+        if not sec.get('monitor_outbound', False):
+            return events
+        ports = set(self.SUSPICIOUS_REMOTE_PORTS) | {str(p) for p in sec.get('suspicious_remote_ports', [])}
+        try:
+            proc = subprocess.run(["ss", "-tnp", "state", "established"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+        except Exception as e:
+            print(f"[-] Outbound connection scan failure: {e}", flush=True)
+            return events
+
+        hits = []
+        for line in proc.stdout.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            peer = parts[4]
+            rport = peer.rsplit(":", 1)[-1]
+            if rport in ports:
+                pinfo = re.search(r'\("([^"]+)",pid=(\d+)', line)
+                who = f" [{pinfo.group(1)} PID {pinfo.group(2)}]" if pinfo else ""
+                hits.append(f"{peer}{who}")
+
+        state_key = "security:outbound"
+        current_status = "WARNING" if hits else "OK"
+        msg = (f"Outbound connection(s) to suspicious ports (reverse shell / mining pool): {', '.join(sorted(set(hits)))}"
+               if hits else "No outbound connections to suspicious ports.")
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_security_outbound_monitor",
+                "target": "connections",
+                "status": current_status,
+                "message": msg,
+            })
+        return events
+
+    PRIVILEGED_GROUPS = ("sudo", "wheel", "docker", "adm", "lxd", "root")
+
+    @register_check(55)
+    def check_privileged_groups(self):
+        """Baselines membership of privilege-granting groups; a new member is a
+        WARNING (docker/lxd membership is effectively root) (todo #9)."""
+        events = []
+        if not self.config.get('checks', {}).get('security', {}).get('monitor_priv_groups', False):
+            return events
+        current = {}
+        try:
+            with open('/etc/group', 'r') as f:
+                for line in f:
+                    parts = line.split(':')
+                    if len(parts) >= 4 and parts[0] in self.PRIVILEGED_GROUPS:
+                        members = set(m for m in parts[3].strip().split(',') if m)
+                        current[parts[0]] = members
+        except Exception as e:
+            print(f"[-] Privileged group scan failure: {e}", flush=True)
+            return events
+
+        state_key = "security:priv_groups"
+        if not self.priv_groups_initialized:
+            self.priv_groups_baseline = current
+            self.priv_groups_initialized = True
+            return events
+
+        added = []
+        for grp, members in current.items():
+            new_members = members - self.priv_groups_baseline.get(grp, set())
+            for m in sorted(new_members):
+                added.append(f"{m} -> {grp}")
+        if added:
+            self.priv_groups_baseline = current
+            msg = f"New member(s) added to privilege-granting groups: {', '.join(added)}. docker/lxd/sudo membership grants root-equivalent access - verify this was intentional."
+            self.last_reported_states[state_key] = msg
+            events.append({
+                "plugin": "agent_security_priv_groups",
+                "target": "group_members",
+                "status": "WARNING",
+                "message": msg,
+            })
+        else:
+            self.priv_groups_baseline = current
+            msg = "Privileged group membership matches trusted baseline."
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_priv_groups",
+                    "target": "group_members",
+                    "status": "OK",
+                    "message": msg,
+                })
+        return events
+
+    @register_check(52)
+    def check_immutable_flags(self):
+        """Detects the immutable attribute (chattr +i) on files in temp dirs or on
+        tracked persistence files - attackers set it to protect a backdoor (todo #12)."""
+        events = []
+        if not self.config.get('checks', {}).get('security', {}).get('monitor_suspicious', False):
+            return events
+        targets = []
+        for d in ("/tmp", "/var/tmp", "/dev/shm"):
+            try:
+                for entry in os.listdir(d):
+                    full = os.path.join(d, entry)
+                    if os.path.isfile(full):
+                        targets.append(full)
+            except Exception:
+                continue
+        targets += self._collect_persistence_files()
+
+        immutable = []
+        for path in targets[:500]:  # cap to bound runtime
+            try:
+                proc = subprocess.run(["lsattr", "-d", path], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, text=True, timeout=10)
+                if proc.returncode == 0 and proc.stdout and 'i' in proc.stdout.split()[0]:
+                    immutable.append(path)
+            except Exception:
+                continue
+
+        state_key = "security:immutable"
+        current_status = "WARNING" if immutable else "OK"
+        msg = (f"Immutable (chattr +i) files in temp/persistence paths (backdoor protection?): {', '.join(immutable)}"
+               if immutable else "No unexpected immutable files in temp/persistence paths.")
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_security_suspicious_activity",
+                "target": "immutable_files",
+                "status": current_status,
+                "message": msg,
+            })
+        return events
+
+    @register_check(53)
+    def check_raw_sockets(self):
+        """Flags processes holding raw IP sockets outside an expected daemon
+        allowlist - possible scanner or backdoor (todo #13, opt-in)."""
+        events = []
+        if not self.config.get('checks', {}).get('security', {}).get('monitor_raw_sockets', False):
+            return events
+        allow = set(self.config.get('checks', {}).get('security', {}).get(
+            'raw_socket_allow', ['dhclient', 'dhcpcd', 'NetworkManager', 'ping', 'ping6', 'systemd-network']))
+        try:
+            with open('/proc/net/raw', 'r') as f:
+                raw_lines = f.readlines()[1:]
+            with open('/proc/net/raw6', 'r') as f:
+                raw_lines += f.readlines()[1:]
+        except Exception:
+            return events
+        raw_inodes = set()
+        for line in raw_lines:
+            parts = line.split()
+            if len(parts) >= 10:
+                raw_inodes.add(parts[9])
+        if not raw_inodes:
+            state_key = "security:raw_sockets"
+            if self.should_report(state_key, "No raw sockets open."):
+                events.append({"plugin": "agent_security_suspicious_activity", "target": "raw_sockets",
+                               "status": "OK", "message": "No raw sockets open."})
+            return events
+
+        offenders = []
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit():
+                continue
+            try:
+                comm = open(f"/proc/{pid}/comm").read().strip()
+                if comm in allow:
+                    continue
+                for fd in os.listdir(f"/proc/{pid}/fd"):
+                    link = os.readlink(f"/proc/{pid}/fd/{fd}")
+                    m = re.search(r'socket:\[(\d+)\]', link)
+                    if m and m.group(1) in raw_inodes:
+                        offenders.append(f"{comm} (PID {pid})")
+                        break
+            except Exception:
+                continue
+
+        state_key = "security:raw_sockets"
+        current_status = "WARNING" if offenders else "OK"
+        msg = (f"Process(es) holding raw sockets outside allowlist (scanner/backdoor?): {', '.join(sorted(set(offenders)))}"
+               if offenders else "Raw socket holders all within expected daemon allowlist.")
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_security_suspicious_activity",
+                "target": "raw_sockets",
+                "status": current_status,
+                "message": msg,
+            })
         return events
 
     @register_check(210)

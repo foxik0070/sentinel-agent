@@ -10,14 +10,14 @@
 4. ✅ ~~Kontrola `LD_PRELOAD` a `/etc/ld.so.preload`~~ — HOTOVO: CRITICAL při neprázdném /etc/ld.so.preload.
 5. ✅ ~~Baseline SUID/SGID binárek v celém systému~~ — HOTOVO: celosystémový sken každých 10 cyklů, CRITICAL na nový SUID/SGID, persistence baseline přes restart.
 6. ✅ ~~Detekce promiskuitního režimu síťových rozhraní~~ — HOTOVO: IFF_PROMISC z /sys/class/net/*/flags, WARNING při aktivním sniffingu.
-7. 🟡 Kontrola podezřelých odchozích spojení — spojení na známé miner pooly / neobvyklé porty (4444, 1337, stratum+tcp).
+7. ✅ ~~Kontrola podezřelých odchozích spojení~~ — HOTOVO: check_outbound_connections, established TCP na podezřelé porty (revshell/miner), config monitor_outbound + suspicious_remote_ports.
 8. ✅ ~~Monitoring selhání sudo/su pokusů z journalu~~ — HOTOVO: journal cursor delta, WARNING při burstu ≥ sudo_fail_threshold (default 3) za cyklus.
-9. 🟡 Detekce nově přidaných uživatelů do skupin sudo/wheel/docker (docker skupina = root ekvivalent).
+9. ✅ ~~Detekce nových členů privilegovaných skupin~~ — HOTOVO: check_privileged_groups, baseline sudo/wheel/docker/adm/lxd/root, WARNING na nového člena, persistence.
 10. ✅ ~~Kontrola kernel modulů proti baseline~~ — HOTOVO: baseline z /proc/modules, WARNING na nově načtený modul (LKM rootkit), persistence přes restart.
 11. ✅ ~~Rozšířit reverse-shell vzory~~ — HOTOVO: perl/php/ruby/python one-linery, /dev/udp, exec N<>/dev/tcp, msfvenom/meterpreter (12 vzorů, otestováno proti false positives).
-12. 🟢 Kontrola immutable flagu na kritických souborech — útočník si někdy nastaví `chattr +i` na svůj backdoor.
-13. 🟢 Detekce procesů s otevřeným raw socketem (možný backdoor/scanner) přes `/proc/net/raw`.
-14. 🟢 Whitelist pro suspicious-process check (config `suspicious_ignore`) — např. legitimní skript v /tmp u CI runneru, omezení false positives.
+12. ✅ ~~Kontrola immutable flagu~~ — HOTOVO: check_immutable_flags, lsattr na tmp + persistence soubory, WARNING na chattr +i.
+13. ✅ ~~Detekce raw socketů~~ — HOTOVO: check_raw_sockets, /proc/net/raw(6) mapované na PID, allowlist démonů, opt-in (monitor_raw_sockets).
+14. ✅ ~~Whitelist pro suspicious-process check~~ — HOTOVO: config suspicious_ignore, přeskočí procesy dle substringu v cmdline.
 15. 🟢 Volitelná integrace `debsums`/`rpm -V` pro ověření integrity systémových balíků (týdenní cadence).
 
 ## Bezpečnost — CVE / aktualizace

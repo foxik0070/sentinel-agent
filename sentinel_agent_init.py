@@ -172,7 +172,7 @@ def load_existing_config():
             "kernel": {"monitor_oom": True, "monitor_zombies": True, "max_zombies": 5, "monitor_io_hangs": True, "monitor_taint": True},
             "system": {"monitor_time_sync": True, "monitor_global_systemd": True},
             "network": {"monitor_dns": True, "monitor_conntrack": True},
-            "security": {"monitor_root_logins": True, "root_login_ignore_ips": [], "monitor_ports": True, "check_system_updates": True, "scan_cves": True, "fail2ban_stats": True, "monitor_suspicious": True, "ssl_certs": []}
+            "security": {"monitor_root_logins": True, "root_login_ignore_ips": [], "monitor_ports": True, "check_system_updates": True, "scan_cves": True, "fail2ban_stats": True, "monitor_suspicious": True, "sudo_fail_threshold": 3, "suspicious_ignore": [], "monitor_outbound": True, "suspicious_remote_ports": [], "monitor_priv_groups": True, "monitor_raw_sockets": False, "raw_socket_allow": ["dhclient", "dhcpcd", "NetworkManager", "ping", "ping6", "systemd-network"], "ssl_certs": []}
         }
     }
 
