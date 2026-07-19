@@ -168,12 +168,12 @@ def load_existing_config():
             "services": [],
             "mounts": [],
             "temperature": {"enabled": True, "warning": 75.0, "critical": 85.0},
-            "hardware": {"monitor_rpi_throttling": True},
+            "hardware": {"monitor_rpi_throttling": True, "nut_ups": ""},
             "storage": {"enabled": True, "paths": ["/"], "warn_percent": 85, "crit_percent": 95, "monitor_wearout": True, "monitor_raid": True, "monitor_disk_health": False},
             "memory": {"enabled": True, "warn_percent": 85, "crit_percent": 95, "monitor_swap": True},
             "kernel": {"monitor_oom": True, "monitor_zombies": True, "max_zombies": 5, "monitor_io_hangs": True, "monitor_taint": True},
             "system": {"monitor_time_sync": True, "monitor_global_systemd": True},
-            "network": {"monitor_dns": True, "monitor_conntrack": True},
+            "network": {"monitor_dns": True, "monitor_conntrack": True, "monitor_reachability": False, "ping_targets": [], "ping_gateway": True, "ping_max_latency_ms": 200, "http_checks": [], "monitor_ip_change": False, "bandwidth_warn_mbps": 0, "bandwidth_ifaces": [], "monitor_mdns_conflict": False},
             "security": {"monitor_root_logins": True, "root_login_ignore_ips": [], "monitor_ports": True, "check_system_updates": True, "scan_cves": True, "fail2ban_stats": True, "monitor_suspicious": True, "sudo_fail_threshold": 3, "suspicious_ignore": [], "monitor_outbound": True, "suspicious_remote_ports": [], "monitor_priv_groups": True, "monitor_raw_sockets": False, "raw_socket_allow": ["dhclient", "dhcpcd", "NetworkManager", "ping", "ping6", "systemd-network"], "pkg_integrity": False, "pkg_integrity_cadence_cycles": 10080, "check_needrestart": False, "check_unattended_upgrades": False, "ssl_certs": []}
         }
     }

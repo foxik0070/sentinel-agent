@@ -43,13 +43,13 @@
 
 ## Síť / infrastruktura — nové checky
 
-31. 🟡 Ping/latence check na definované cíle (gateway, internet) — detekce degradace sítě.
-32. 🟡 Monitoring šířky pásma rozhraní — alert na saturaci nebo anomální odchozí tok (exfiltrace/miner).
-33. 🟡 HTTP(S) health check definovaných URL (interní služby) — status kód + latence.
-34. 🟡 Kontrola DHCP vs statické IP — alert když se změní IP adresa uzlu.
-35. 🟢 Monitoring UPS přes NUT (`upsc`) — stav baterie, on-battery events.
-36. 🟢 Kontrola dostupnosti default gateway (arping) — detekce L2 problémů.
-37. 🟢 mDNS/avahi konflikt detekce (duplicitní hostname na síti).
+31. ✅ ~~Ping/latence check~~ — HOTOVO: check_network_reachability, ping cíle + auto gateway, WARNING na loss/latenci.
+32. ✅ ~~Monitoring šířky pásma~~ — HOTOVO: check_bandwidth, rate z /sys statistics, WARNING nad bandwidth_warn_mbps (opt-in).
+33. ✅ ~~HTTP(S) health check~~ — HOTOVO: check_http_health, status kód + latence definovaných URL (http_checks).
+34. ✅ ~~Detekce změny primární IP~~ — HOTOVO: check_ip_change, WARNING při změně outbound IP (monitor_ip_change).
+35. ✅ ~~UPS přes NUT~~ — HOTOVO: check_ups_nut, on-battery=WARNING, low-battery=CRITICAL (hardware.nut_ups).
+36. ✅ ~~Dostupnost default gateway~~ — HOTOVO: součást check_network_reachability (auto-detekce gw z /proc/net/route + ping).
+37. ✅ ~~mDNS/avahi konflikt~~ — HOTOVO: check_mdns_conflict, journal avahi-daemon, WARNING na hostname konflikt (opt-in).
 
 ## Hardware — nové checky
 

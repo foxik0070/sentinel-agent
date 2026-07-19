@@ -1,11 +1,230 @@
 """System & network health: temperature, RPi throttling, time sync,
-DNS, systemd failures, conntrack, memory."""
-import os, re, socket, subprocess
+DNS, systemd failures, conntrack, memory, plus network reachability,
+HTTP health, IP change, bandwidth, UPS and mDNS conflict checks."""
+import os, re, socket, subprocess, time, urllib.request
 
 from checks import register_check
 
 
 class SystemChecks:
+    def _default_gateway(self):
+        """Returns the IPv4 default gateway address from /proc/net/route, or None."""
+        try:
+            with open('/proc/net/route', 'r') as f:
+                for line in f.readlines()[1:]:
+                    fields = line.split()
+                    if len(fields) >= 3 and fields[1] == '00000000':
+                        gw = int(fields[2], 16)
+                        return ".".join(str((gw >> (8 * i)) & 0xff) for i in range(4))
+        except Exception:
+            return None
+        return None
+
+    @register_check(155)
+    def check_network_reachability(self):
+        """Pings configured targets plus the default gateway; reports unreachable
+        hosts and high latency (todo #31, #36)."""
+        events = []
+        net = self.config.get('checks', {}).get('network', {})
+        if not net.get('monitor_reachability', False):
+            return events
+        targets = list(net.get('ping_targets', []))
+        if net.get('ping_gateway', True):
+            gw = self._default_gateway()
+            if gw and gw not in targets:
+                targets.append(gw)
+        max_latency = net.get('ping_max_latency_ms', 200)
+
+        for target in targets:
+            state_key = f"network:ping:{target}"
+            try:
+                proc = subprocess.run(["ping", "-c", "3", "-W", "2", target],
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15)
+                if proc.returncode != 0:
+                    current_status, msg = "WARNING", f"Ping target '{target}' unreachable (100% packet loss)."
+                else:
+                    m = re.search(r"= [\d.]+/([\d.]+)/", proc.stdout)
+                    avg = float(m.group(1)) if m else 0.0
+                    if avg > max_latency:
+                        current_status = "WARNING"
+                        msg = f"Ping target '{target}' high latency: {avg:.0f}ms (limit {max_latency}ms)."
+                    else:
+                        current_status = "OK"
+                        msg = f"Ping target '{target}' reachable ({avg:.0f}ms)."
+            except Exception as e:
+                current_status, msg = "WARNING", f"Ping target '{target}' check error: {e}"
+            if self.should_report(state_key, msg):
+                events.append({"plugin": "agent_network_reachability", "target": target,
+                               "status": current_status, "message": msg})
+        return events
+
+    @register_check(156)
+    def check_http_health(self):
+        """HTTP(S) health check of configured URLs: status code + latency (todo #33)."""
+        events = []
+        checks = self.config.get('checks', {}).get('network', {}).get('http_checks', [])
+        for entry in checks:
+            url = entry.get('url')
+            if not url:
+                continue
+            expect = entry.get('expect_status', 200)
+            max_ms = entry.get('max_latency_ms', 5000)
+            state_key = f"network:http:{url}"
+            try:
+                start = time.monotonic()
+                req = urllib.request.Request(url, method="GET", headers={"User-Agent": "sentinel-agent"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    code = resp.status
+                elapsed = (time.monotonic() - start) * 1000
+                if code != expect:
+                    current_status, msg = "WARNING", f"HTTP check '{url}' returned {code} (expected {expect})."
+                elif elapsed > max_ms:
+                    current_status, msg = "WARNING", f"HTTP check '{url}' slow: {elapsed:.0f}ms (limit {max_ms}ms)."
+                else:
+                    current_status, msg = "OK", f"HTTP check '{url}' healthy ({code}, {elapsed:.0f}ms)."
+            except Exception as e:
+                current_status, msg = "WARNING", f"HTTP check '{url}' failed: {type(e).__name__}: {e}"
+            if self.should_report(state_key, msg):
+                events.append({"plugin": "agent_network_http_monitor", "target": url,
+                               "status": current_status, "message": msg})
+        return events
+
+    @register_check(157)
+    def check_ip_change(self):
+        """Alerts when the node's primary outbound IP changes (todo #34)."""
+        events = []
+        if not self.config.get('checks', {}).get('network', {}).get('monitor_ip_change', False):
+            return events
+        current_ip = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("192.0.2.1", 9))  # TEST-NET-1, no packets sent
+            current_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            return events
+
+        if not hasattr(self, '_ip_baseline') or self._ip_baseline is None:
+            self._ip_baseline = current_ip
+            return events
+        state_key = "network:primary_ip"
+        if current_ip != self._ip_baseline:
+            msg = f"Primary IP address changed from {self._ip_baseline} to {current_ip}."
+            self._ip_baseline = current_ip
+            self.last_reported_states[state_key] = msg
+            events.append({"plugin": "agent_network_ip_monitor", "target": "primary_ip",
+                           "status": "WARNING", "message": msg})
+        else:
+            msg = f"Primary IP address stable at {current_ip}."
+            if self.should_report(state_key, msg):
+                events.append({"plugin": "agent_network_ip_monitor", "target": "primary_ip",
+                               "status": "OK", "message": msg})
+        return events
+
+    @register_check(158)
+    def check_bandwidth(self):
+        """Interface throughput; WARNING above a configured rate (exfiltration /
+        saturation) (todo #32)."""
+        events = []
+        net = self.config.get('checks', {}).get('network', {})
+        warn_mbps = net.get('bandwidth_warn_mbps', 0)
+        if not warn_mbps:
+            return events
+        ifaces = net.get('bandwidth_ifaces', []) or [
+            d for d in os.listdir('/sys/class/net') if d != 'lo']
+        if not hasattr(self, '_bw_last'):
+            self._bw_last = {}
+        now = time.monotonic()
+        for iface in ifaces:
+            try:
+                with open(f"/sys/class/net/{iface}/statistics/rx_bytes") as f:
+                    rx = int(f.read())
+                with open(f"/sys/class/net/{iface}/statistics/tx_bytes") as f:
+                    tx = int(f.read())
+            except Exception:
+                continue
+            prev = self._bw_last.get(iface)
+            self._bw_last[iface] = (rx, tx, now)
+            if not prev:
+                continue
+            dt = now - prev[2]
+            if dt <= 0:
+                continue
+            rx_mbps = (rx - prev[0]) * 8 / dt / 1e6
+            tx_mbps = (tx - prev[1]) * 8 / dt / 1e6
+            peak = max(rx_mbps, tx_mbps)
+            state_key = f"network:bandwidth:{iface}"
+            if peak > warn_mbps:
+                current_status = "WARNING"
+                msg = f"Interface '{iface}' throughput {peak:.0f} Mbps exceeds threshold {warn_mbps} Mbps (rx {rx_mbps:.0f}/tx {tx_mbps:.0f})."
+            else:
+                current_status = "OK"
+                msg = f"Interface '{iface}' throughput within limits ({peak:.0f} Mbps)."
+            if self.should_report(state_key, msg):
+                events.append({"plugin": "agent_network_bandwidth_monitor", "target": iface,
+                               "status": current_status, "message": msg})
+        return events
+
+    @register_check(85)
+    def check_ups_nut(self):
+        """UPS status via NUT (upsc): on-battery / low-battery / charge (todo #35)."""
+        events = []
+        ups = self.config.get('checks', {}).get('hardware', {}).get('nut_ups', '')
+        if not ups:
+            return events
+        try:
+            proc = subprocess.run(["upsc", ups], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, timeout=10)
+        except FileNotFoundError:
+            return events
+        except Exception as e:
+            print(f"[-] UPS (NUT) check failure: {e}", flush=True)
+            return events
+        if proc.returncode != 0:
+            return events
+        status = re.search(r"ups\.status:\s*(.+)", proc.stdout)
+        charge = re.search(r"battery\.charge:\s*(\d+)", proc.stdout)
+        st = status.group(1).strip() if status else ""
+        chg = f", charge {charge.group(1)}%" if charge else ""
+        state_key = "hardware:ups"
+        if "OB" in st or "LB" in st:
+            current_status = "CRITICAL" if "LB" in st else "WARNING"
+            msg = f"UPS '{ups}' on battery / low (status: {st}{chg}). Mains power lost."
+        elif st:
+            current_status = "OK"
+            msg = f"UPS '{ups}' on mains power (status: {st}{chg})."
+        else:
+            return events
+        if self.should_report(state_key, msg):
+            events.append({"plugin": "agent_ups_monitor", "target": ups,
+                           "status": current_status, "message": msg})
+        return events
+
+    @register_check(159)
+    def check_mdns_conflict(self):
+        """Detects Avahi/mDNS hostname conflicts (duplicate hostname on the LAN)
+        from the journal (todo #37)."""
+        events = []
+        if not self.config.get('checks', {}).get('network', {}).get('monitor_mdns_conflict', False):
+            return events
+        lines = self._journal_delta("avahi_journal.cursor", ["-t", "avahi-daemon"])
+        if lines is None:
+            return events
+        conflicts = [l for l in lines if re.search(r"conflict|withdrawing|Host name.*already", l, re.IGNORECASE)]
+        state_key = "network:mdns_conflict"
+        if conflicts:
+            msg = f"mDNS/Avahi hostname conflict detected (duplicate hostname on network): {conflicts[-1].strip()[:120]}"
+            self.last_reported_states[state_key] = msg
+            events.append({"plugin": "agent_network_mdns_monitor", "target": "hostname",
+                           "status": "WARNING", "message": msg})
+        else:
+            msg = "No mDNS/Avahi hostname conflicts."
+            if self.should_report(state_key, msg):
+                events.append({"plugin": "agent_network_mdns_monitor", "target": "hostname",
+                               "status": "OK", "message": msg})
+        return events
+
+
     def _get_cpu_temperature(self):
         """Reads the CPU temperature from system thermal zones (compatible with Pi and Ubuntu)."""
         thermal_paths = [
