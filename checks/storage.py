@@ -113,6 +113,9 @@ class StorageChecks:
         for drive in drives:
             try:
                 proc = subprocess.run(["smartctl", "-A", drive], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+            except FileNotFoundError:
+                return events
+            try:
                 if proc.returncode != 0:
                     continue
 
@@ -218,6 +221,9 @@ class StorageChecks:
                     ["smartctl", "-H", drive],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30
                 )
+            except FileNotFoundError:
+                return events
+            try:
                 output = proc.stdout
                 state_key = f"storage:health:{drive}"
 
