@@ -259,7 +259,7 @@ class SecurityChecks:
         base version without bumping the upstream major.minor.patch, so
         upstream version-range checks produce false positives."""
         release = os.uname().release
-        return bool(re.search(r'\.el[5-9]', release))
+        return bool(re.search(r'\.el\d', release))
 
     @register_check(60)
     def check_kernel_cves(self):
