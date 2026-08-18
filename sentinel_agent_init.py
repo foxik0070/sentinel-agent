@@ -326,7 +326,24 @@ def setup_agent_venv(working_dir):
         print(f"{C_FAIL}[!] Failed to install dependencies into venv: {e}{C_END}")
         sys.exit(1)
 
+    _fix_selinux_context(python_bin, working_dir)
     return python_bin
+
+
+def _fix_selinux_context(python_bin, working_dir):
+    """On SELinux-enforcing systems, set bin_t on executables so systemd (init_t) can run them."""
+    try:
+        result = subprocess.run(["getenforce"], capture_output=True, text=True)
+        if result.returncode != 0 or result.stdout.strip() not in ("Enforcing", "Permissive"):
+            return
+    except FileNotFoundError:
+        return
+
+    agent_py = os.path.join(working_dir, "sentinel_agent.py")
+    targets = [f for f in [python_bin, agent_py] if os.path.exists(f)]
+    for path in targets:
+        subprocess.run(["chcon", "-t", "bin_t", path], capture_output=True)
+    print(f"{C_GREEN}[+] SELinux: set bin_t context on {len(targets)} executable(s).{C_END}")
 
 AGENT_ISSUES_SCRIPT = """\
 #!/usr/bin/env python3
