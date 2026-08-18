@@ -122,12 +122,12 @@ class SecurityChecks:
                 elif self.os_family == "rhel":
                     dnf_proc = subprocess.run(["dnf", "check-update", "--security"], stdout=subprocess.PIPE, text=True, timeout=120)
                     if dnf_proc.returncode == 100:
-                        sec_lines = [l for l in dnf_proc.stdout.splitlines() if l.strip() and not l.startswith(('Last metadata', 'Obsoleting'))]
+                        sec_lines = [l for l in dnf_proc.stdout.splitlines() if l.strip() and '.' in l.split()[0] and len(l.split()) >= 3]
                         sec_update_count = len(sec_lines)
-                        sec_packages = [l.split()[0] for l in sec_lines if l.split()]
+                        sec_packages = [l.split()[0] for l in sec_lines]
                     dnf_all = subprocess.run(["dnf", "check-update"], stdout=subprocess.PIPE, text=True, timeout=120)
                     if dnf_all.returncode == 100:
-                        update_count = len([l for l in dnf_all.stdout.splitlines() if l.strip()])
+                        update_count = len([l for l in dnf_all.stdout.splitlines() if l.strip() and '.' in l.split()[0] and len(l.split()) >= 3])
 
                 current_status = "CRITICAL" if sec_update_count > 0 else ("WARNING" if update_count > 20 else "OK")
                 if current_status == "CRITICAL":
@@ -254,6 +254,13 @@ class SecurityChecks:
             return None
         return tuple(int(g) for g in match.groups())
 
+    def _is_distro_kernel(self):
+        """RHEL/CentOS/Rocky/Alma kernels backport CVE fixes into a stable
+        base version without bumping the upstream major.minor.patch, so
+        upstream version-range checks produce false positives."""
+        release = os.uname().release
+        return bool(re.search(r'\.el[5-9]', release))
+
     @register_check(60)
     def check_kernel_cves(self):
         """Compares the running kernel version against known local privilege
@@ -266,13 +273,26 @@ class SecurityChecks:
         if kver is None:
             return events
 
+        state_key = "security:kernel_lpe_cves"
+        release = os.uname().release
+
+        if self._is_distro_kernel():
+            msg = f"Kernel {release} is a distribution-patched kernel (backported fixes); upstream CVE range check skipped."
+            current_status = "OK"
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_security_kernel_cve",
+                    "target": "kernel",
+                    "status": current_status,
+                    "message": msg
+                })
+            return events
+
         hits = []
         for cve_id, nickname, ranges in self.KERNEL_LPE_CVES:
             if any(lo <= kver < hi for lo, hi in ranges):
                 hits.append(f"{cve_id} ({nickname})")
 
-        state_key = "security:kernel_lpe_cves"
-        release = os.uname().release
         if hits:
             current_status = "WARNING"
             msg = (f"Kernel {release} version falls into known privilege-escalation CVE ranges: "
