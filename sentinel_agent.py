@@ -355,6 +355,266 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             print(f"    {issue['message']}")
             print()
 
+    def check_zombie_processes(self):
+        events = []
+        kernel_config = self.config.get('checks', {}).get('kernel', {})
+        if not kernel_config.get('monitor_zombies', False):
+            return events
+
+        max_zombies = kernel_config.get('max_zombies', 5)
+        try:
+            proc = subprocess.run(["ps", "-eo", "state"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            zombie_count = proc.stdout.splitlines().count("Z")
+
+            state_key = "kernel:zombies"
+            if zombie_count >= max_zombies:
+                current_status = "WARNING"
+                msg = f"Defunct process accumulation detected. System contains multiple uncleaned zombie tasks."
+            else:
+                current_status = "OK"
+                msg = "Process lifecycle management execution context is clear."
+
+            if self.should_report(state_key, msg):
+                full_msg = f"{msg} Active Defunct Count: {zombie_count} (Limit: {max_zombies})."
+                events.append({
+                    "plugin": "agent_process_zombie_monitor",
+                    "target": "process_table",
+                    "status": current_status,
+                    "message": full_msg
+                })
+        except Exception as e:
+            print(f"[-] Zombie tracking utility execution exception: {e}")
+        return events
+
+    def check_time_synchronization(self):
+        events = []
+        if not self.config.get('checks', {}).get('system', {}).get('monitor_time_sync', False):
+            return events
+
+        try:
+            proc = subprocess.run(["timedatectl"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            state_key = "system:time_sync"
+            if "System clock synchronized: yes" in proc.stdout or "NTP service: active" in proc.stdout:
+                current_status = "OK"
+                msg = "System reference clock synchronized with upstream network time clusters."
+            else:
+                current_status = "WARNING"
+                msg = "System reference clock drift warning! Local timestamp is unsynchronized."
+
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_system_time_sync",
+                    "target": "ntp_clock",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] Time synchronization status validation failure: {e}")
+        return events
+
+    def check_dns_resolution_health(self):
+        events = []
+        if not self.config.get('checks', {}).get('network', {}).get('monitor_dns', False):
+            return events
+
+        state_key = "network:dns_resolution"
+        test_domain = "one.one.one.one"
+        try:
+            socket.gethostbyname(test_domain)
+            current_status = "OK"
+            msg = "Network resolver loops functioning normally. DNS resolution online."
+        except socket.gaierror:
+            current_status = "WARNING"
+            msg = f"Network socket resolution exception. Unable to resolve test target domain '{test_domain}'."
+
+        if self.should_report(state_key, msg):
+            events.append({
+                "plugin": "agent_network_dns_monitor",
+                "target": "resolver",
+                "status": current_status,
+                "message": msg
+            })
+        return events
+
+    def check_global_systemd_failures(self):
+        events = []
+        if not self.config.get('checks', {}).get('system', {}).get('monitor_global_systemd', False):
+            return events
+
+        try:
+            proc = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-legend", "--plain"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            failed_units = []
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                # systemctl prepends ● bullet — skip it to get the unit name
+                unit = parts[1] if parts[0] == '●' else parts[0]
+                if unit and '.' in unit:
+                    failed_units.append(unit)
+
+            state_key = "systemd:global_failures"
+            if failed_units:
+                current_status = "CRITICAL"
+                msg = f"Systemd subsystem alert! Failed units detected: {', '.join(failed_units)}"
+            else:
+                current_status = "OK"
+                msg = "All systemd units operating within expected runtime parameters."
+
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_systemd_global_monitor",
+                    "target": "unit_matrix",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] Global systemd failure check exception: {e}")
+        return events
+
+    def check_uninterruptible_processes(self):
+        events = []
+        if not self.config.get('checks', {}).get('kernel', {}).get('monitor_io_hangs', False):
+            return events
+
+        try:
+            proc = subprocess.run(["ps", "-eo", "state,pid,comm"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            d_processes = []
+            for line in proc.stdout.splitlines():
+                if line.strip().startswith("D"):
+                    parts = line.split(None, 2)
+                    if len(parts) >= 3:
+                        d_processes.append(f"{parts[2]} (PID: {parts[1]})")
+
+            state_key = "kernel:io_hang"
+            if len(d_processes) >= 2:
+                current_status = "CRITICAL"
+                msg = f"I/O Hang Detected! Processes stuck in uninterruptible sleep: {', '.join(d_processes)}"
+            else:
+                current_status = "OK"
+                msg = "Storage Subsystem and kernel I/O pipelines executing cleanly."
+
+            if self.should_report(state_key, msg):
+                events.append({
+                    "plugin": "agent_kernel_io_monitor",
+                    "target": "process_scheduler",
+                    "status": current_status,
+                    "message": msg
+                })
+        except Exception as e:
+            print(f"[-] D-state tracking exception: {e}")
+        return events
+
+    def check_conntrack_pressure(self):
+        events = []
+        if not self.config.get('checks', {}).get('network', {}).get('monitor_conntrack', False):
+            return events
+
+        count_path = "/proc/sys/net/netfilter/nf_conntrack_count"
+        max_path = "/proc/sys/net/netfilter/nf_conntrack_max"
+
+        if os.path.exists(count_path) and os.path.exists(max_path):
+            try:
+                with open(count_path, 'r') as c_file, open(max_path, 'r') as m_file:
+                    count = int(c_file.read().strip())
+                    maximum = int(m_file.read().strip())
+                
+                pct_used = (count / maximum) * 100 if maximum > 0 else 0
+                state_key = "network:conntrack_table"
+
+                if pct_used >= 90:
+                    current_status = "CRITICAL"
+                    msg = "Network Firewall Emergency! Netfilter conntrack table is near exhaustion."
+                elif pct_used >= 75:
+                    current_status = "WARNING"
+                    msg = "Network Firewall Pressure. High connection tracking table utilization detected."
+                else:
+                    current_status = "OK"
+                    msg = "Netfilter connection tracking table metrics inside safe structural baselines."
+
+                if self.should_report(state_key, msg):
+                    full_msg = f"{msg} Current usage: {pct_used:.1f}% ({count}/{maximum})."
+                    events.append({
+                        "plugin": "agent_netfilter_monitor",
+                        "target": "conntrack_subsystem",
+                        "status": current_status,
+                        "message": full_msg
+                    })
+            except Exception as e:
+                print(f"[-] Conntrack reading metrics exception: {e}")
+        return events
+
+    def check_kernel_taint(self):
+        events = []
+        if not self.config.get('checks', {}).get('kernel', {}).get('monitor_taint', False):
+            return events
+
+        taint_path = "/proc/sys/kernel/tainted"
+        if os.path.exists(taint_path):
+            try:
+                with open(taint_path, 'r') as stream:
+                    taint_value = int(stream.read().strip())
+
+                state_key = "kernel:taint_status"
+                if taint_value != 0:
+                    current_status = "WARNING"
+                    msg = f"Kernel status flag is TAINTED (Value: {taint_value}). Subsystems might be unstable or non-free modules/MCE hardware errors occurred."
+                else:
+                    current_status = "OK"
+                    msg = "Kernel execution context is pristine and untainted."
+
+                if self.should_report(state_key, msg):
+                    events.append({
+                        "plugin": "agent_kernel_taint_monitor",
+                        "target": "core_kernel",
+                        "status": current_status,
+                        "message": msg
+                    })
+            except Exception as e:
+                print(f"[-] Kernel taint abstraction check failure: {e}")
+        return events
+
+    def check_ssl_cert_expiration(self):
+        events = []
+        cert_config = self.config.get('checks', {}).get('security', {}).get('ssl_certs', [])
+        if not cert_config:
+            return events
+
+        for cert_path in cert_config:
+            if not os.path.exists(cert_path):
+                continue
+            try:
+                proc = subprocess.run(["openssl", "x509", "-enddate", "-noout", "-in", cert_path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                if proc.returncode != 0:
+                    continue
+                
+                date_str = proc.stdout.replace("notAfter=", "").strip()
+                exp_date = datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+                days_left = (exp_date - datetime.now(timezone.utc)).days
+
+                state_key = f"security:ssl_expire:{cert_path}"
+                if days_left <= 3:
+                    current_status = "CRITICAL"
+                    msg = f"SSL Certificate target '{cert_path}' is about to expire immediately!"
+                elif days_left <= 14:
+                    current_status = "WARNING"
+                    msg = f"SSL Certificate target '{cert_path}' approaching expiration parameters."
+                else:
+                    current_status = "OK"
+                    msg = f"SSL Certificate target '{cert_path}' cryptographic validity window is safe."
+
+                if self.should_report(state_key, msg):
+                    full_msg = f"{msg} Days remaining: {days_left} days (Expires: {date_str})."
+                    events.append({
+                        "plugin": "agent_ssl_cert_monitor",
+                        "target": cert_path,
+                        "status": current_status,
+                        "message": full_msg
+                    })
+            except Exception as e:
+                print(f"[-] SSL certificate parsing exception for {cert_path}: {e}")
+        return events
+
     def push_to_sentinel(self, events):
         """
         Odesila datovy ramec na centralni server.
