@@ -25,6 +25,7 @@ import json
 import gzip
 import signal
 import hashlib
+import platform
 import datetime
 from datetime import datetime, timezone
 
@@ -91,6 +92,7 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
         }
         
         self.os_family = self._detect_os_family()
+        self.os_name, self.os_id = self._detect_os_release()
         self.is_virtual = self._is_virtual_environment()
         self.agent_version = self._detect_agent_version()
 
@@ -183,6 +185,20 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
         if os.path.exists("/etc/debian_version"): return "debian"
         elif os.path.exists("/etc/redhat-release") or os.path.exists("/etc/centos-release"): return "rhel"
         return "generic"
+
+    def _detect_os_release(self):
+        """Reads PRETTY_NAME and ID from /etc/os-release for Commander AI context."""
+        os_name = os_id = ""
+        try:
+            with open('/etc/os-release') as f:
+                for line in f:
+                    if line.startswith('PRETTY_NAME='):
+                        os_name = line.split('=', 1)[1].strip().strip('"')
+                    elif line.startswith('ID='):
+                        os_id = line.split('=', 1)[1].strip().strip('"')
+        except Exception:
+            os_name = platform.system()
+        return os_name, os_id
 
     def _is_virtual_environment(self):
         """Returns True if running inside a VM or container (LXC, QEMU, KVM, etc.)."""
@@ -644,6 +660,8 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hostname": self.hostname,
             "agent_version": self.agent_version,
+            "os_name": self.os_name,
+            "os_id": self.os_id,
             "events": events
         }
 
