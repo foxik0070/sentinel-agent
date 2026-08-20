@@ -457,8 +457,15 @@ class SystemChecks:
             return events
 
         try:
-            proc = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-legend"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
-            failed_units = [line.split()[0] for line in proc.stdout.splitlines() if line.strip()]
+            proc = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-legend", "--plain"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+            failed_units = []
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                unit = parts[1] if parts[0] == '●' else parts[0]
+                if unit and '.' in unit:
+                    failed_units.append(unit)
 
             state_key = "systemd:global_failures"
             if failed_units:
