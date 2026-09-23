@@ -113,8 +113,15 @@ class SecurityChecks:
             sec_packages = []
             try:
                 if self.os_family == "debian":
-                    apt_proc = subprocess.run(["apt-get", "-s", "upgrade"], stdout=subprocess.PIPE, text=True, timeout=120)
-                    upgrade_lines = [l for l in apt_proc.stdout.splitlines() if l.startswith("Inst ")]
+                    # apt-get -s upgrade stoji ~1 s CPU; bezel kazdych 60 s na vsech
+                    # hostech. Vysledek se meni jen se stavem dpkg nebo apt lists,
+                    # proto se znovu pousti az pri zmene jejich mtime.
+                    apt_key = tuple(os.stat(f).st_mtime_ns if os.path.exists(f) else 0
+                                    for f in ("/var/lib/dpkg/status", "/var/lib/apt/lists"))
+                    if getattr(self, '_apt_sim_key', None) != apt_key:
+                        apt_proc = subprocess.run(["apt-get", "-s", "upgrade"], stdout=subprocess.PIPE, text=True, timeout=120)
+                        self._apt_sim_out, self._apt_sim_key = apt_proc.stdout, apt_key
+                    upgrade_lines = [l for l in self._apt_sim_out.splitlines() if l.startswith("Inst ")]
                     update_count = len(upgrade_lines)
                     sec_lines = [l for l in upgrade_lines if "security" in l.lower() or "cve" in l.lower()]
                     sec_update_count = len(sec_lines)
