@@ -78,6 +78,13 @@ class SecurityChecks:
                         if len(parts) < 4:
                             continue
                         tty = parts[1]
+                        # Novejsi utmp (systemd v Debian 13 / Ubuntu 24.04) vypisuje
+                        # i NEinteraktivni SSH (prikazy, sftp, multiplexing) s tty
+                        # "sshd". Monitor je na interaktivni loginy (pts/N) — starsi
+                        # `who` tyhle vubec nevypisoval, jinak by kazdy beh Ansiblu
+                        # a trvale spojeni collectoru hlasilo "root session".
+                        if tty == "sshd":
+                            continue
                         # IP is always in parentheses — extract by regex regardless of column count
                         ip_match = re.search(r'\(([^)]+)\)', line)
                         if not ip_match:
