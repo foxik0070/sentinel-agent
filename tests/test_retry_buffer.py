@@ -21,6 +21,9 @@ def offline_agent(agent):
     agent.headers = {}
     agent.hostname = "testhost"
     agent.agent_version = "test"
+    # push_to_sentinel posila os_name/os_id (PR #2) — __new__ je nenastavi
+    agent.os_name = "Test OS"
+    agent.os_id = "test"
     # _save_state is called on failure; make it a no-op for the unit test
     agent._save_state = lambda: None
     return agent

@@ -46,6 +46,44 @@ except ImportError:
 # Central configuration path
 CONFIG_FILE = "/etc/sentinel/agent_config.yaml"
 
+# plugin -> (sekce, prepinac) v checks.* agent_configu, vse s vychozim False
+# (stejne jako gate v samotnych kontrolach). Aktivni problemy se drzi ve
+# state.json a kazdy cyklus znovu potvrzuji; VYPNUTA kontrola nikdy neposle OK,
+# takze jeji posledni problem by v Sentinelu visel navzdy (stalo se 2026-09-24
+# s monitor_taint). Jen pluginy s jednoznacnym prepinacem — sdilene
+# (agent_security_suspicious_activity) a bez prepinace tu zamerne nejsou.
+PLUGIN_GATES = {
+    "agent_kernel_taint_monitor": ("kernel", "monitor_taint"),
+    "agent_kernel_oom_monitor": ("kernel", "monitor_oom"),
+    "agent_kernel_io_monitor": ("kernel", "monitor_io_hangs"),
+    "agent_process_zombie_monitor": ("kernel", "monitor_zombies"),
+    "agent_network_port_security": ("security", "monitor_ports"),
+    "agent_security_root_monitor": ("security", "monitor_root_logins"),
+    "agent_security_reboot_required": ("security", "check_system_updates"),
+    "agent_security_firewall_fail2ban": ("security", "fail2ban_stats"),
+    "agent_security_kernel_cve": ("security", "scan_cves"),
+    "agent_security_package_integrity": ("security", "pkg_integrity"),
+    "agent_security_needrestart": ("security", "check_needrestart"),
+    "agent_security_unattended_upgrades": ("security", "check_unattended_upgrades"),
+    "agent_security_outbound_monitor": ("security", "monitor_outbound"),
+    "agent_security_priv_groups": ("security", "monitor_priv_groups"),
+    "agent_storage_capacity_monitor": ("storage", "enabled"),
+    "agent_raid_monitor": ("storage", "monitor_raid"),
+    "agent_ssd_wearout_monitor": ("storage", "monitor_wearout"),
+    "agent_disk_health_monitor": ("storage", "monitor_disk_health"),
+    "agent_network_reachability": ("network", "monitor_reachability"),
+    "agent_network_ip_monitor": ("network", "monitor_ip_change"),
+    "agent_network_mdns_monitor": ("network", "monitor_mdns_conflict"),
+    "agent_network_dns_monitor": ("network", "monitor_dns"),
+    "agent_netfilter_monitor": ("network", "monitor_conntrack"),
+    "agent_fan_monitor": ("hardware", "monitor_fans"),
+    "agent_rpi_power_monitor": ("hardware", "monitor_rpi_throttling"),
+    "agent_temperature_monitor": ("temperature", "enabled"),
+    "agent_memory_monitor": ("memory", "enabled"),
+    "agent_system_time_sync": ("system", "monitor_time_sync"),
+    "agent_systemd_global_monitor": ("system", "monitor_global_systemd"),
+}
+
 from checks import registered_check_names
 from checks.services import ServicesChecks
 from checks.security import SecurityChecks
@@ -814,9 +852,27 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             events.extend(getattr(self, check_name)())
         return events
 
+    def _disabled_check_clears(self):
+        """OK udalosti pro aktivni problemy, jejichz kontrola je v configu vypnuta.
+        Pozn.: po opetovnem zapnuti se problem nahlasi az pri zmene stavu
+        (last_reported_states si pamatuje posledni zpravu)."""
+        checks = self.config.get('checks', {})
+        clears = []
+        for info in self.active_issues.values():
+            gate = PLUGIN_GATES.get(info.get('plugin'))
+            if gate and not checks.get(gate[0], {}).get(gate[1], False):
+                clears.append({
+                    "plugin": info['plugin'],
+                    "target": info['target'],
+                    "status": "OK",
+                    "message": "Check disabled in agent config - issue cleared.",
+                })
+        return clears
+
     def _apply_and_push(self, events):
         """Updates the active-issue registry, persists state, and pushes deltas
         plus re-affirmations of still-active issues."""
+        events = list(events) + self._disabled_check_clears()
         for evt in events:
             issue_key = f"{evt['plugin']}:{evt['target']}"
             if evt['status'] == 'OK':
