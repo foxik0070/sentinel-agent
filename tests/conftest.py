@@ -20,5 +20,6 @@ def agent():
     a.config = {"checks": {"security": {}, "storage": {}, "kernel": {}}}
     a.last_reported_states = {}
     a.pending_events = []
+    a.pending_metrics = {}
     a.max_pending_events = 500
     return a

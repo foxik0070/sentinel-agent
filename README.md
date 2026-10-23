@@ -304,6 +304,13 @@ The monolithic agent execution block contains 25 built-in sub-modules. Each modu
 *   **Mechanism:** Queries the Raspberry Pi firmware via `vcgencmd get_throttled` and decodes the bitmask. Automatically skipped on non-RPi hardware (binary absent). Controlled by `hardware.monitor_rpi_throttling`.
 *   **Logic:** Bits 0–3 are active conditions, bits 16–19 are since-boot history. Active under-voltage (bit 0) triggers `CRITICAL` — it is the most common cause of mysterious RPi instability (bad PSU or cable). Frequency capping, active throttling, soft temperature limits, and all historical flags trigger `WARNING`. Historical flags persist until reboot, keeping an unstable power supply visible.
 
+### 26. `agent_ai_session_monitor`
+*   **Mechanism:** Walks `/proc` and classifies every process into one of three groups: interactive CLI agents (Claude Code, Codex, Aider, Gemini CLI, Cursor Agent, Goose, OpenCode, Crush, Amp, Copilot CLI), local LLM runtimes (Ollama, llama.cpp, vLLM, LocalAI, LM Studio, TGI, SGLang) and MCP servers. Matching is not done on `comm` alone — most of these agents run as `node` or `python3`, so the basenames of the first few `argv` entries are matched too (`node …/claude/cli.js` → `claude`). With `ai.check_api_connections` on, established connections from `ss -tnp` are additionally matched against the resolved IPs of known provider APIs (anthropic, openai, gemini, mistral, groq, deepseek, openrouter, cohere, x.ai), which catches a tool that is not recognised by name. Controlled by `ai.monitor_sessions`.
+*   **Reported per session:** owning user, tool, PID, model (see below), working directory, run time and the full command line.
+*   **Logic:** The inventory is sent with status `OK`. This is deliberate: the Sentinel ingest treats every status other than `ok`/`resolved` as an **active issue**, so an informational status would leave one hanging per AI session forever. A `WARNING` is raised only when a CLI agent or MCP server runs as `root`, or as a user outside `ai.allowed_users` when that list is non-empty. Long-lived system runtimes such as `ollama serve` are exempt from that rule — a service account running a model daemon is not somebody starting an agent as root. The session count also goes out as the numeric `ai_sessions` metric, which Sentinel stores as telemetry and graphs.
+*   **Model detection:** read from `/proc/<pid>/environ` through a **name whitelist** (`ANTHROPIC_MODEL`, `OPENAI_MODEL`, `OLLAMA_HOST`, …). The environment block also holds API keys, so it is never forwarded wholesale.
+*   **Privacy note:** the command line is reported in full and an agent's command line usually contains the prompt (`claude -p "…"`) and internal project paths. That text ends up in the Sentinel database and in the chat context. Values following `--api-key`/`--token`/`--password`/`--secret` and bare `sk-`/`ghp_`-style keys are replaced with `<redacted>`, each command line is capped at 300 characters and the whole message at 4000. The check is **off by default** for this reason; `ai.ignore_tools` can mute individual tools.
+
 ---
 
 ## 5. Configuration Schema Blueprint
@@ -419,6 +426,14 @@ checks:
     sudo_fail_threshold: 3      # sudo/su auth failures per cycle before a WARNING is raised
     ssl_certs:
       - /etc/letsencrypt/live/example.com/fullchain.pem
+
+  ai:
+    monitor_sessions: false     # OFF by default: the reported command line contains the prompt
+    check_api_connections: true # Also flag unrecognised processes talking to provider APIs
+    allowed_users:              # Empty list = anybody but root may run an agent
+      - developer
+    ignore_tools:               # Tool names to leave out of the inventory
+      - Ollama
 ```
 
 ---

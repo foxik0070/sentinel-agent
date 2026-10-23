@@ -66,6 +66,7 @@ LANG_DICT = {
         'conn': "Sleduje vytizeni tabulky conntrack na firewallu, cimz predchazi zahazovani paketu.",
         'root': "Spusti poplach pokazde, kdyz se nekdo prihlasi na server pod uctem root (pouze SSH prihlaseni, tmux sessiony jsou ignorovany).",
         'root_ignore_ips': "Zadejte IP adresy, ze kterych se root prihlaseni ignoruji (napr. 192.168.1.1).",
+        'ai': "Hlasi bezici AI agenty (Claude Code, Codex, Aider, Gemini CLI...), lokalni LLM runtimy (Ollama, vLLM) a MCP servery: kdo je spustil, jaky nastroj, jaky model a s jakym prikazem. Inventar chodi jako OK, VAROVANI je az kdyz AI agenta pusti root nebo uzivatel mimo seznam. POZOR: prikazova radka obsahuje i zadani promptu, takze konci v Sentinel DB.",
         'ports': "Vytvori snimek aktualne otevrenych portu a varuje, pokud se otevre novy (necekany) port.",
         'updates': "Dotazuje se balickovaciho systemu (apt/dnf) na cekajici systemove aktualizace.",
         'cve': "Hleda kriticke bezpecnostni zaplaty (CVE) v cekajicich aktualizacich a porovnava verzi kernelu se znamymi privilege-escalation exploity (Dirty COW, Dirty Pipe, nf_tables...).",
@@ -100,6 +101,7 @@ LANG_DICT = {
         'conn': "Monitors firewall conntrack table utilization to prevent packet drops.",
         'root': "Triggers an alert whenever someone logs into the server as the root user (SSH logins only, tmux sessions are ignored).",
         'root_ignore_ips': "Enter IP addresses from which root logins are ignored (e.g., 192.168.1.1).",
+        'ai': "Reports running AI agents (Claude Code, Codex, Aider, Gemini CLI...), local LLM runtimes (Ollama, vLLM) and MCP servers: who started them, which tool, which model and the command line. The inventory is sent as OK; a WARNING is raised only when root or a user outside the allowlist runs an agent. NOTE: the command line includes the prompt, so it ends up in the Sentinel DB.",
         'ports': "Creates a snapshot of currently open ports and warns if a new (unexpected) port opens.",
         'updates': "Queries the package manager (apt/dnf) for pending system updates.",
         'cve': "Looks for critical security patches (CVE) in pending updates and compares the kernel version against known privilege-escalation exploits (Dirty COW, Dirty Pipe, nf_tables...).",
@@ -178,6 +180,7 @@ def load_existing_config():
             "memory": {"enabled": True, "warn_percent": 85, "crit_percent": 95, "monitor_swap": True},
             "kernel": {"monitor_oom": True, "monitor_zombies": True, "max_zombies": 5, "monitor_io_hangs": True, "monitor_taint": True},
             "system": {"monitor_time_sync": True, "monitor_global_systemd": True},
+            "ai": {"monitor_sessions": False, "check_api_connections": True, "allowed_users": [], "ignore_tools": []},
             "network": {"monitor_dns": True, "monitor_conntrack": True, "monitor_reachability": False, "ping_targets": [], "ping_gateway": True, "ping_max_latency_ms": 200, "http_checks": [], "monitor_ip_change": False, "bandwidth_warn_mbps": 0, "bandwidth_ifaces": [], "monitor_mdns_conflict": False},
             "security": {"monitor_root_logins": True, "root_login_ignore_ips": [], "monitor_ports": True, "check_system_updates": True, "scan_cves": True, "fail2ban_stats": True, "monitor_suspicious": True, "sudo_fail_threshold": 3, "suspicious_ignore": [], "monitor_outbound": True, "suspicious_remote_ports": [], "monitor_priv_groups": True, "monitor_raw_sockets": False, "raw_socket_allow": ["dhclient", "dhcpcd", "NetworkManager", "ping", "ping6", "systemd-network"], "pkg_integrity": False, "pkg_integrity_cadence_cycles": 10080, "check_needrestart": False, "check_unattended_upgrades": False, "ssl_certs": []}
         }
@@ -582,6 +585,13 @@ def main(lang):
     cfg["checks"]["security"]["fail2ban_stats"] = prompt_bool("Monitor security blocking counts from local Fail2ban", cfg["checks"]["security"].get("fail2ban_stats", True), txt['f2b'])
     cfg["checks"]["security"]["monitor_suspicious"] = prompt_bool("Monitor suspicious processes & exploit footprints (CVE abuse)", cfg["checks"]["security"].get("monitor_suspicious", True), txt['suspicious'])
     
+    cfg["checks"].setdefault("ai", {})
+    cfg["checks"]["ai"]["monitor_sessions"] = prompt_bool("Monitor running AI agent sessions (who runs which AI, and what it is doing)", cfg["checks"]["ai"].get("monitor_sessions", False), txt['ai'])
+    if cfg["checks"]["ai"]["monitor_sessions"]:
+        _allowed = prompt_input("Users allowed to run AI agents, comma separated (empty = anyone but root)",
+                                ",".join(cfg["checks"]["ai"].get("allowed_users", [])))
+        cfg["checks"]["ai"]["allowed_users"] = [u.strip() for u in str(_allowed).split(",") if u.strip()]
+
     if prompt_bool("Do you want to configure SSL/TLS Certificate Expiration Watcher?", True, txt['ssl_q']):
         cfg["checks"]["security"]["ssl_certs"] = configure_ssl_certs(cfg["checks"]["security"].get("ssl_certs", []))
     else:

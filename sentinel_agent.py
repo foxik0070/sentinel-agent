@@ -80,6 +80,7 @@ PLUGIN_GATES = {
     "agent_rpi_power_monitor": ("hardware", "monitor_rpi_throttling"),
     "agent_temperature_monitor": ("temperature", "enabled"),
     "agent_memory_monitor": ("memory", "enabled"),
+    "agent_ai_session_monitor": ("ai", "monitor_sessions"),
     "agent_system_time_sync": ("system", "monitor_time_sync"),
     "agent_systemd_global_monitor": ("system", "monitor_global_systemd"),
 }
@@ -90,6 +91,7 @@ from checks.security import SecurityChecks
 from checks.storage import StorageChecks
 from checks.kernel import KernelChecks
 from checks.system import SystemChecks
+from checks.ai import AIChecks
 
 
 class SourceAddressAdapter(HTTPAdapter):
@@ -103,7 +105,7 @@ class SourceAddressAdapter(HTTPAdapter):
         super().init_poolmanager(*args, **kwargs)
 
 class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
-                    KernelChecks, SystemChecks):
+                    KernelChecks, SystemChecks, AIChecks):
     def __init__(self, fast_mode=False):
         """Initializes the agent, loads configuration, and prepares state trackers."""
         self.fast_mode = fast_mode
@@ -146,6 +148,9 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
         # --- Active Issue Registry & Service Flap Tracking ---
         self.active_issues = {}
         self.flap_counts = {}
+
+        # --- Numeric metrics for the current cycle (Sentinel ukláda do telemetry) ---
+        self.pending_metrics = {}
 
         # --- Retry Buffer (events from failed pushes, replayed on next success) ---
         self.pending_events = []
@@ -702,6 +707,10 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
             "os_id": self.os_id,
             "events": events
         }
+        # Ciselne metriky cyklu; Sentinel je bere z klice "metrics" do telemetry.
+        if self.pending_metrics:
+            payload["metrics"] = dict(self.pending_metrics)
+            self.pending_metrics.clear()
 
         # TLS verification (#43): default on; optional custom CA bundle.
         verify = api.get('ca_bundle') or api.get('verify_tls', True)
