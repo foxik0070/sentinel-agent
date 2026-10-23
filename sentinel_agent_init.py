@@ -9,6 +9,7 @@ All inline comments and logs are maintained in English.
 """
 
 import os
+import re
 import sys
 import socket
 import shutil
@@ -330,8 +331,41 @@ def setup_agent_venv(working_dir):
     return python_bin
 
 
+def _semanage_bin_t(specs):
+    """Record persistent bin_t file-context rules. False if semanage cannot do it."""
+    try:
+        for spec in specs:
+            res = subprocess.run(["semanage", "fcontext", "-a", "-t", "bin_t", spec],
+                                 capture_output=True, text=True)
+            if res.returncode != 0:
+                # A rule left over from an earlier install is modified, not re-added.
+                if "already defined" not in (res.stderr or ""):
+                    return False
+                res = subprocess.run(["semanage", "fcontext", "-m", "-t", "bin_t", spec],
+                                     capture_output=True, text=True)
+                if res.returncode != 0:
+                    return False
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _restorecon(path):
+    """Apply the recorded contexts. False if restorecon is missing or fails."""
+    try:
+        return subprocess.run(["restorecon", "-R", path], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
 def _fix_selinux_context(python_bin, working_dir):
-    """On SELinux-enforcing systems, set bin_t on executables so systemd (init_t) can run them."""
+    """On SELinux-enforcing systems, set bin_t on executables so systemd (init_t) can run them.
+
+    The rules go through semanage so they survive a relabel: anything under /root
+    defaults to admin_home_t, which init_t may not execute, and a selinux-policy
+    update runs `fixfiles restore` in %posttrans -- that wipes a plain chcon and
+    the service then dies with 203/EXEC on the next boot.
+    """
     try:
         result = subprocess.run(["getenforce"], capture_output=True, text=True)
         if result.returncode != 0 or result.stdout.strip() not in ("Enforcing", "Permissive"):
@@ -341,9 +375,23 @@ def _fix_selinux_context(python_bin, working_dir):
 
     agent_py = os.path.join(working_dir, "sentinel_agent.py")
     targets = [f for f in [python_bin, agent_py] if os.path.exists(f)]
+    if not targets:
+        return
+
+    specs = []
+    if os.path.exists(python_bin):
+        specs.append(re.escape(os.path.dirname(python_bin)) + "(/.*)?")
+    if os.path.exists(agent_py):
+        specs.append(re.escape(agent_py))
+
+    if _semanage_bin_t(specs) and _restorecon(working_dir):
+        print(f"{C_GREEN}[+] SELinux: persistent bin_t context set for {len(specs)} path(s).{C_END}")
+        return
+
     for path in targets:
         subprocess.run(["chcon", "-t", "bin_t", path], capture_output=True)
-    print(f"{C_GREEN}[+] SELinux: set bin_t context on {len(targets)} executable(s).{C_END}")
+    print(f"{C_WARN}[i] SELinux: semanage unavailable, fell back to chcon on {len(targets)} "
+          f"executable(s) -- the label is lost on the next relabel.{C_END}")
 
 AGENT_ISSUES_SCRIPT = """\
 #!/usr/bin/env python3
