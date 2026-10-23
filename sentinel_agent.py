@@ -152,6 +152,11 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
         # --- Numeric metrics for the current cycle (Sentinel ukláda do telemetry) ---
         self.pending_metrics = {}
 
+        # --- Strukturovana AI sezeni cyklu (Sentinel je uklada do ai_sessions) ---
+        # None = detektor v tomhle cyklu nebezel, klic se do payloadu neda vubec.
+        # Prazdny seznam uz je tvrzeni "nic nebezi" a ukonci evidovana sezeni.
+        self.pending_ai_sessions = None
+
         # --- Retry Buffer (events from failed pushes, replayed on next success) ---
         self.pending_events = []
         self.max_pending_events = self.config.get('agent_core', {}).get('max_pending_events', 500)
@@ -711,6 +716,12 @@ class SentinelAgent(ServicesChecks, SecurityChecks, StorageChecks,
         if self.pending_metrics:
             payload["metrics"] = dict(self.pending_metrics)
             self.pending_metrics.clear()
+        # Seznam AI sezeni. Posila se i prazdny, jinak by Sentinel nepoznal
+        # rozdil mezi "nic nebezi" a "detektor je vypnuty" a sezeni by zustala
+        # viset jako aktivni navzdy.
+        if self.pending_ai_sessions is not None:
+            payload["ai_sessions"] = list(self.pending_ai_sessions)
+            self.pending_ai_sessions = None
 
         # TLS verification (#43): default on; optional custom CA bundle.
         verify = api.get('ca_bundle') or api.get('verify_tls', True)

@@ -180,3 +180,40 @@ def test_scan_of_real_proc_does_not_raise(ai):
     # /proc je plny procesu, ke kterym nemusime mit prava a ktere mizi pod rukama.
     for s in ai._scan_proc():
         assert {"pid", "user", "tool", "category", "cmdline"} <= set(s)
+
+
+# --- strukturovana data do payloadu -----------------------------------------
+
+def test_structured_sessions_carry_identity_fields(ai, monkeypatch):
+    _wire(ai, monkeypatch, [_session(model="ANTHROPIC_MODEL=claude-opus-5")])
+    ai.check_ai_sessions()
+    s = ai.pending_ai_sessions[0]
+    assert s["user"] == "foxik" and s["tool"] == "Claude Code" and s["pid"] == 101
+    assert s["model"] == "ANTHROPIC_MODEL=claude-opus-5"
+
+
+def test_api_client_is_normalised_into_a_session(ai, monkeypatch):
+    ai.config["checks"]["ai"]["check_api_connections"] = True
+    _wire(ai, monkeypatch, [], api=[{"pid": 777, "user": "www-data",
+                                     "process": "python3", "host": "api.openai.com"}])
+    ai.check_ai_sessions()
+    s = ai.pending_ai_sessions[0]
+    assert s["category"] == "api" and s["tool"] == "python3" and s["remote"] == "api.openai.com"
+
+
+def test_started_at_is_stable_across_polls(ai):
+    # Identita sezeni na serveru stoji na (host, pid, started_at) -- kdyby se
+    # started_at mezi polly hnul, kazdy cyklus by zalozil novy zaznam.
+    import os
+    first = ai._proc_start_epoch(os.getpid())
+    second = ai._proc_start_epoch(os.getpid())
+    assert first == second and first is not None
+
+
+def test_disabled_detector_sends_no_session_key(ai, monkeypatch):
+    ai.config["checks"]["ai"]["monitor_sessions"] = False
+    ai.pending_ai_sessions = None
+    _wire(ai, monkeypatch, [_session()])
+    ai.check_ai_sessions()
+    # Prazdny seznam by znamenal "nic nebezi" a ukoncil by evidovana sezeni.
+    assert ai.pending_ai_sessions is None

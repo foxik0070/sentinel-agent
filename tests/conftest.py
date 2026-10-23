@@ -21,5 +21,6 @@ def agent():
     a.last_reported_states = {}
     a.pending_events = []
     a.pending_metrics = {}
+    a.pending_ai_sessions = None
     a.max_pending_events = 500
     return a

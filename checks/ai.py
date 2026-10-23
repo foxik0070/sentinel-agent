@@ -1,6 +1,7 @@
 """AI agent session monitoring: interactive CLI agents, local LLM runtimes,
 MCP servers and outbound connections to AI provider APIs."""
 import os, pwd, re, socket, subprocess, time
+from datetime import datetime, timezone
 
 from checks import register_check
 
@@ -113,8 +114,8 @@ class AIChecks:
                 return f"{key}={val}"
         return None
 
-    def _proc_runtime(self, pid):
-        """Doba behu procesu v sekundach, nebo None."""
+    def _proc_start_epoch(self, pid):
+        """Unixovy cas startu procesu, nebo None."""
         try:
             with open(f"/proc/{pid}/stat") as fh:
                 stat = fh.read()
@@ -122,10 +123,15 @@ class AIChecks:
             fields = stat[stat.rindex(")") + 2:].split()
             start_ticks = int(fields[19])
             hz = os.sysconf("SC_CLK_TCK") or 100
-            started = self._boot_time() + start_ticks / hz
-            return max(0, int(time.time() - started)) if self._boot_time() else None
+            boot = self._boot_time()
+            return boot + start_ticks / hz if boot else None
         except Exception:
             return None
+
+    def _proc_runtime(self, pid):
+        """Doba behu procesu v sekundach, nebo None."""
+        started = self._proc_start_epoch(pid)
+        return max(0, int(time.time() - started)) if started else None
 
     @staticmethod
     def _human_age(seconds):
@@ -174,6 +180,7 @@ class AIChecks:
             except Exception:
                 cwd = "?"
 
+            started = self._proc_start_epoch(pid)
             sessions.append({
                 "pid": int(pid),
                 "user": user,
@@ -181,7 +188,9 @@ class AIChecks:
                 "tool": tool,
                 "model": self._proc_model(pid),
                 "cwd": cwd,
-                "age": self._proc_runtime(pid),
+                "age": max(0, int(time.time() - started)) if started else None,
+                "started_at": (datetime.fromtimestamp(started, timezone.utc).isoformat()
+                               if started else None),
                 "cmdline": self._redact(" ".join(tokens))[:self.CMDLINE_MAX],
             })
         return sessions
@@ -284,6 +293,26 @@ class AIChecks:
         parts = [self._describe(s) for s in sorted(sessions, key=lambda s: (s["user"], s["tool"]))]
         parts += [f"🌐 {c['user']}/{c['process']}, PID {c['pid']} -> {c['host']} (neznamy nastroj)"
                   for c in extra]
+
+        # Strukturovana podoba pro Sentinel; textova zprava vyse je jen pro
+        # cloveka, modal potrebuje jednotliva pole.
+        structured = list(sessions)
+        for c in extra:
+            started = self._proc_start_epoch(c["pid"])
+            structured.append({
+                "pid": c["pid"],
+                "user": c["user"],
+                "category": "api",
+                "tool": c["process"],
+                "model": None,
+                "cwd": None,
+                "age": self._proc_runtime(c["pid"]),
+                "started_at": (datetime.fromtimestamp(started, timezone.utc).isoformat()
+                               if started else None),
+                "cmdline": f"-> {c['host']}",
+                "remote": c["host"],
+            })
+        self.pending_ai_sessions = structured
 
         if offenders:
             status = "WARNING"
