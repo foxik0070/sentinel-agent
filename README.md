@@ -311,6 +311,58 @@ The monolithic agent execution block contains 25 built-in sub-modules. Each modu
 *   **Model detection:** read from `/proc/<pid>/environ` through a **name whitelist** (`ANTHROPIC_MODEL`, `OPENAI_MODEL`, `OLLAMA_HOST`, …). The environment block also holds API keys, so it is never forwarded wholesale.
 *   **Privacy note:** the command line is reported in full and an agent's command line usually contains the prompt (`claude -p "…"`) and internal project paths. That text ends up in the Sentinel database and in the chat context. Values following `--api-key`/`--token`/`--password`/`--secret` and bare `sk-`/`ghp_`-style keys are replaced with `<redacted>`, each command line is capped at 300 characters and the whole message at 4000. The check is **off by default** for this reason; `ai.ignore_tools` can mute individual tools.
 
+### 27. `agent_security_outbound_monitor`
+*   **Mechanism:** Parses `ss -tnp state established` and matches remote ports against a built-in list of ports associated with reverse shells and mining pools, extended by `security.suspicious_remote_ports`. Controlled by `security.monitor_outbound`.
+*   **Logic:** Any established outbound connection to such a port raises a `WARNING` naming the peer and the owning process. Outbound traffic is the step an intruder cannot avoid — the payload may be unknown, the destination port rarely is.
+
+### 28. `agent_security_priv_groups`
+*   **Mechanism:** Baselines the membership of privilege-granting groups (`sudo`, `wheel`, `docker`, `adm`, `lxd`, `root`). Controlled by `security.monitor_priv_groups`.
+*   **Logic:** A new member triggers a `WARNING`. Membership in `docker` or `lxd` is effectively root — a quiet addition there is a privilege escalation that no sudoers audit would show.
+
+### 29. `agent_security_package_integrity`
+*   **Mechanism:** Verifies installed packages against the package manager's own checksums (`rpm -Va` / `dpkg --verify`). Controlled by `security.pkg_integrity`; cadence in cycles via `security.pkg_integrity_cadence_cycles` (default weekly).
+*   **Logic:** A modified binary belonging to a package is a strong rootkit signal. The check is expensive, so it runs on a cadence rather than every cycle.
+
+### 30. `agent_security_needrestart`
+*   **Mechanism:** Runs `needrestart -b` (Debian/Ubuntu) to list services still running against deleted libraries. Controlled by `security.check_needrestart`.
+*   **Logic:** A patched library takes effect only once every process using it restarts. Until then the machine reports as updated while still running the vulnerable code.
+
+### 31. `agent_security_unattended_upgrades`
+*   **Mechanism:** Checks that `unattended-upgrades` is enabled and that its last run succeeded. Controlled by `security.check_unattended_upgrades`.
+*   **Logic:** Silent failure of automatic updates is the dangerous case — the machine looks maintained and is not.
+
+### 32. `agent_network_reachability`
+*   **Mechanism:** Pings `network.ping_targets` and, with `network.ping_gateway`, the default gateway; latency above `network.ping_max_latency_ms` is flagged. Controlled by `network.monitor_reachability`.
+*   **Logic:** Separates "the host is down" from "the path to it is down" — the agent reports from inside the segment, so a failure here narrows the fault to the local network.
+
+### 33. `agent_network_http_monitor`
+*   **Mechanism:** Requests each entry in `network.http_checks` (`url`, `expect_status`, `max_latency_ms`) and compares status and latency.
+*   **Logic:** A service can listen on its port and still answer wrong. This is the one check that looks at the answer, not just the socket.
+
+### 34. `agent_network_ip_monitor`
+*   **Mechanism:** Baselines the host's addresses and reports changes. Controlled by `network.monitor_ip_change`.
+*   **Logic:** An address that changes under a server breaks DNS, firewall rules and certificates at once, usually after a DHCP lease change nobody watched.
+
+### 35. `agent_network_mdns_monitor`
+*   **Mechanism:** Watches for mDNS name conflicts (`hostname-2.local` style renames). Controlled by `network.monitor_mdns_conflict`.
+*   **Logic:** A conflict means two machines claim one name — the renamed one silently stops being reachable under the name everything else uses.
+
+### 36. `agent_network_bandwidth_monitor`
+*   **Mechanism:** Reads interface counters and computes throughput; interfaces from `network.bandwidth_ifaces` (autodetected when empty). Enabled by setting `network.bandwidth_warn_mbps` above zero.
+*   **Logic:** Sustained saturation is reported as a `WARNING` — it explains latency complaints that look like application faults.
+
+### 37. `agent_filesystem_readonly_monitor`
+*   **Mechanism:** Checks the mounts in `hardware.readonly_mounts` (default `/`) for a read-only remount. Controlled by `hardware.monitor_readonly_remount` (on by default).
+*   **Logic:** The kernel remounts read-only to protect a failing device. On an SD-card machine it is the classic symptom of a dying card, and services keep running while every write quietly fails.
+
+### 38. `agent_fan_monitor`
+*   **Mechanism:** Reads fan tachometers from `hwmon`. Controlled by `hardware.monitor_fans`.
+*   **Logic:** A stopped fan is reported before the temperature check has anything to say — by the time the thermal alert fires, the throttling has already happened.
+
+### 39. `agent_ups_monitor`
+*   **Mechanism:** Queries NUT via `upsc` for the UPS named in `hardware.nut_ups`.
+*   **Logic:** Reports on-battery, low-battery and charge level. The window between a power cut and an unclean shutdown is exactly as long as the battery lasts, and nothing else on the host knows about it.
+
 ---
 
 ## 5. Configuration Schema Blueprint
@@ -520,7 +572,7 @@ a pytest suite that runs without a config file or root privileges:
 
 ```bash
 pip install -r requirements-dev.txt
-python3 -m pytest        # 53 tests
+python3 -m pytest        # 97 tests
 ```
 
 These tests guard the git auto-update mechanism: a logic regression that would
