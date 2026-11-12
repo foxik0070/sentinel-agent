@@ -363,6 +363,12 @@ The monolithic agent execution block contains 25 built-in sub-modules. Each modu
 *   **Mechanism:** Queries NUT via `upsc` for the UPS named in `hardware.nut_ups`.
 *   **Logic:** Reports on-battery, low-battery and charge level. The window between a power cut and an unclean shutdown is exactly as long as the battery lasts, and nothing else on the host knows about it.
 
+
+> **Not a check:** the agent also reports under the plugin name `agent_core_updater`
+> when `agent_core.git_auto_update` pulls a new revision — success, and the rollback
+> that follows when the pulled code fails to compile. It appears in the Sentinel
+> issue list like any plugin, but runs no monitoring of its own.
+
 ---
 
 ## 5. Configuration Schema Blueprint
