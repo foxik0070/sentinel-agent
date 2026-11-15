@@ -7,9 +7,25 @@ from checks import register_check
 
 
 class SecurityChecks:
+    @staticmethod
+    def _ephemeral_range():
+        """Dynamic port range (net.ipv4.ip_local_port_range). Ports in it are short-lived
+        client/helper sockets, never a deliberately exposed service."""
+        try:
+            lo, hi = open("/proc/sys/net/ipv4/ip_local_port_range").read().split()
+            return int(lo), int(hi)
+        except Exception:
+            return 32768, 60999
+
     def _get_listening_ports(self):
+        """Ports reachable from the network. Loopback-only listeners (local helper ports
+        of user apps - AI CLIs, model runners, editors) and the ephemeral range are
+        skipped, as are ports in checks.security.allowed_ports."""
         active_ports = set()
         ignored_ports = {"123", "53", "68", "111", "22", "80", "443"}
+        sec_config = self.config.get('checks', {}).get('security', {})
+        ignored_ports |= {str(p) for p in sec_config.get('allowed_ports', []) or []}
+        eph_lo, eph_hi = self._ephemeral_range()
         try:
             proc = subprocess.run(["ss", "-tulpn"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
             lines = proc.stdout.splitlines()
@@ -19,7 +35,12 @@ class SecurityChecks:
                     protocol = "tcp" if "tcp" in parts[0].lower() else "udp"
                     local_addr = parts[4]
                     if ":" in local_addr:
-                        port = local_addr.split(":")[-1]
+                        host, port = local_addr.rsplit(":", 1)
+                        host = host.strip("[]").split("%")[0]
+                        if host.startswith("127.") or host == "::1":
+                            continue
+                        if port.isdigit() and eph_lo <= int(port) <= eph_hi:
+                            continue
                         if port not in ignored_ports:
                             active_ports.add(f"{protocol}:{port}")
         except Exception as e:
@@ -36,6 +57,15 @@ class SecurityChecks:
         state_key = "network:ports_drift"
         
         if not self.ports_initialized:
+            # Right after boot services are still starting. A baseline taken now would
+            # flag every late service as "new" (seen after a reboot on 2026-11-12).
+            try:
+                uptime = float(open("/proc/uptime").read().split()[0])
+            except Exception:
+                uptime = 1e9
+            settle = int(self.config.get('checks', {}).get('security', {}).get('baseline_settle_seconds', 300))
+            if uptime < settle:
+                return events
             self.baseline_ports = current_ports
             self.ports_initialized = True
             print(f"[*] Sockets Baseline compiled. Tracked ports list: {list(self.baseline_ports)}", flush=True)

@@ -474,6 +474,11 @@ checks:
     root_login_ignore_ips:      # Root logins from these IPs are silently ignored
       - 192.168.1.1
     monitor_ports: true         # Alert on new TCP ports vs. startup baseline
+                                # (loopback-only listeners and the ephemeral range are ignored)
+    allowed_ports:              # Extra ports never reported as new
+      - 8090
+    baseline_settle_seconds: 300 # Wait this long after boot before taking the baseline,
+                                # otherwise late-starting services look like new ports
     check_system_updates: true  # Pending apt/dnf packages + reboot-required flag
     scan_cves: true             # Security-tagged packages in pending updates + kernel LPE CVE ranges
     fail2ban_stats: true        # Alert when active ban count exceeds 50
@@ -578,7 +583,7 @@ a pytest suite that runs without a config file or root privileges:
 
 ```bash
 pip install -r requirements-dev.txt
-python3 -m pytest        # 97 tests
+python3 -m pytest        # 102 tests
 ```
 
 These tests guard the git auto-update mechanism: a logic regression that would
