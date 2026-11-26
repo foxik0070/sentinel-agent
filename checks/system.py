@@ -4,6 +4,13 @@ HTTP health, IP change, bandwidth, UPS and mDNS conflict checks."""
 import os, re, socket, subprocess, time, urllib.request
 
 from checks import register_check
+import fnmatch
+
+# Jednotky, jejichz selhani neni porucha systemu. session-*.scope vznika
+# a zanika s kazdym prihlasenim; na prihlasovacim uzlu jich padaji tisice.
+_DEFAULT_SYSTEMD_IGNORE = ['session-*.scope', 'user@*.service', 'user-*.slice']
+
+
 
 
 class SystemChecks:
@@ -458,14 +465,23 @@ class SystemChecks:
 
         try:
             proc = subprocess.run(["systemctl", "list-units", "--state=failed", "--no-legend", "--plain"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+            # Relace uzivatelu (session-NNNNN.scope) na prihlasovacich uzlech
+            # padaji bezne a maji pokazde jine cislo. Delta filtr porovnava text
+            # zpravy, takze kazde nove cislo = nova zprava = nove hlaseni — a
+            # skutecny nalez (treba NetworkManager-wait-online) v tom zanikne.
+            ignore_patterns = self.config.get('checks', {}).get('system', {}).get(
+                'systemd_ignore_units', _DEFAULT_SYSTEMD_IGNORE)
             failed_units = []
             for line in proc.stdout.splitlines():
                 parts = line.split()
                 if not parts:
                     continue
                 unit = parts[1] if parts[0] == '●' else parts[0]
-                if unit and '.' in unit:
-                    failed_units.append(unit)
+                if not unit or '.' not in unit:
+                    continue
+                if any(fnmatch.fnmatch(unit, pat) for pat in (ignore_patterns or [])):
+                    continue
+                failed_units.append(unit)
 
             state_key = "systemd:global_failures"
             if failed_units:

@@ -3,6 +3,29 @@ import os, re, subprocess
 
 from checks import register_check
 
+# Vychozi ignorovane taint bity: modul mimo strom jadra (12), nepodepsany
+# modul (13) a pomocny priznak (16). Na strojich s ovladaci vyrobcu (GPU,
+# InfiniBand) jsou trvale a necemu ne-v-poradku neodpovidaji.
+_DEFAULT_TAINT_IGNORE_BITS = [12, 13, 16]
+
+_TAINT_BITS = {
+    0: "proprietary module", 1: "forced module load", 2: "unsafe SMP",
+    3: "forced rmmod", 4: "MCE hardware error", 5: "bad page",
+    6: "user-forced taint", 7: "process died recently", 8: "ACPI table overridden",
+    9: "kernel warning issued", 10: "staging driver", 11: "firmware bug workaround",
+    12: "out-of-tree module", 13: "unsigned module", 14: "soft lockup",
+    15: "live patched", 16: "auxiliary", 17: "struct randomization",
+    18: "in-kernel test",
+}
+
+
+def _taint_bit_names(value: int) -> list:
+    """Jmena nastavenych bitu — ciselna hodnota je sama o sobe necitelna."""
+    return [f"bit{b} ({_TAINT_BITS.get(b, 'unknown')})"
+            for b in range(32) if value >> b & 1]
+
+
+
 
 class KernelChecks:
     OOM_REGEX = r"(Out of memory: Kill process|Killed process \d+ \(.+?\) total-vm)"
@@ -156,13 +179,33 @@ class KernelChecks:
                 with open(taint_path, 'r') as stream:
                     taint_value = int(stream.read().strip())
 
+                # Bity, ktere na dane masine nic neznamenaji. Na HPC uzlu taintuji
+                # jadro ovladace InfiniBandu a KNEM (mimo strom jadra, nepodepsane)
+                # — je to trvaly a ocekavany stav, ktery se nikdy nevyresi, takze
+                # hlaseni by se opakovalo donekonecna a prebilo by to, na cem
+                # opravdu zalezi: MCE, vadnou stranku pameti, soft lockup.
+                ignored = self.config.get('checks', {}).get('kernel', {}).get(
+                    'taint_ignore_bits', _DEFAULT_TAINT_IGNORE_BITS)
+                mask = 0
+                for b in ignored or []:
+                    try:
+                        mask |= 1 << int(b)
+                    except (TypeError, ValueError):
+                        continue
+                significant = taint_value & ~mask
+
                 state_key = "kernel:taint_status"
-                if taint_value != 0:
+                if significant != 0:
                     current_status = "WARNING"
-                    msg = f"Kernel status flag is TAINTED (Value: {taint_value}). Subsystems might be unstable or non-free modules/MCE hardware errors occurred."
+                    names = ", ".join(_taint_bit_names(significant)) or "?"
+                    msg = (f"Kernel status flag is TAINTED (Value: {taint_value}, "
+                           f"significant: {significant} — {names}). Subsystems might be unstable "
+                           f"or non-free modules/MCE hardware errors occurred.")
                 else:
                     current_status = "OK"
-                    msg = "Kernel execution context is pristine and untainted."
+                    msg = ("Kernel execution context is pristine and untainted."
+                           if taint_value == 0 else
+                           f"Kernel is tainted (Value: {taint_value}), but only by expected flags.")
 
                 if self.should_report(state_key, msg):
                     events.append({

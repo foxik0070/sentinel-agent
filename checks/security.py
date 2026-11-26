@@ -6,6 +6,30 @@ from datetime import datetime, timezone
 from checks import register_check
 
 
+def _parse_allowed_ports(values):
+    """Rozdeli allowed_ports na jednotlive porty a rozsahy.
+
+    Puvodne sel zapsat jen vyctem cisel, coz u sluzeb s dynamickym cislem
+    displeje (VNC 5901, 5902, 5921...) znamenalo vypisovat desitky hodnot.
+    Prijima proto i "5900-5999". Nesmyslny zapis se preskoci, aby preklep
+    v configu neshodil celou kontrolu.
+    """
+    singles, ranges = set(), []
+    for v in values or []:
+        text = str(v).strip()
+        if '-' in text:
+            lo, _, hi = text.partition('-')
+            try:
+                lo_i, hi_i = int(lo), int(hi)
+            except ValueError:
+                continue
+            if lo_i <= hi_i:
+                ranges.append((lo_i, hi_i))
+        elif text:
+            singles.add(text)
+    return singles, ranges
+
+
 class SecurityChecks:
     @staticmethod
     def _ephemeral_range():
@@ -24,7 +48,8 @@ class SecurityChecks:
         active_ports = set()
         ignored_ports = {"123", "53", "68", "111", "22", "80", "443"}
         sec_config = self.config.get('checks', {}).get('security', {})
-        ignored_ports |= {str(p) for p in sec_config.get('allowed_ports', []) or []}
+        allow_single, allow_ranges = _parse_allowed_ports(sec_config.get('allowed_ports', []))
+        ignored_ports |= allow_single
         eph_lo, eph_hi = self._ephemeral_range()
         try:
             proc = subprocess.run(["ss", "-tulpn"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
@@ -40,6 +65,8 @@ class SecurityChecks:
                         if host.startswith("127.") or host == "::1":
                             continue
                         if port.isdigit() and eph_lo <= int(port) <= eph_hi:
+                            continue
+                        if port.isdigit() and any(lo <= int(port) <= hi for lo, hi in allow_ranges):
                             continue
                         if port not in ignored_ports:
                             active_ports.add(f"{protocol}:{port}")

@@ -455,6 +455,10 @@ checks:
     monitor_swap: true          # Also report swap utilization independently
 
   kernel:
+    taint_ignore_bits: [12, 13, 16]  # out-of-tree / unsigned module / auxiliary —
+                                # permanent on nodes with vendor GPU or InfiniBand
+                                # drivers, so alerting on them never resolves.
+                                # MCE (4), bad page (5) and soft lockup (14) stay.
     monitor_oom: true           # OOM killer events from dmesg
     monitor_zombies: true
     max_zombies: 5
@@ -464,6 +468,10 @@ checks:
   system:
     monitor_time_sync: true     # NTP synchronization via timedatectl
     monitor_global_systemd: true # systemctl list-units --state=failed
+    systemd_ignore_units:       # Units whose failure is not a system fault.
+      - 'session-*.scope'       # user sessions fail routinely on login nodes
+      - 'user@*.service'        # and their numbers change every time, so the
+      - 'user-*.slice'          # delta filter reported them over and over
 
   network:
     monitor_dns: true           # DNS resolution test (one.one.one.one)
@@ -475,8 +483,9 @@ checks:
       - 192.168.1.1
     monitor_ports: true         # Alert on new TCP ports vs. startup baseline
                                 # (loopback-only listeners and the ephemeral range are ignored)
-    allowed_ports:              # Extra ports never reported as new
-      - 8090
+    allowed_ports:              # Extra ports never reported as new;
+      - 8090                    # single numbers or ranges ("5900-5999" for VNC)
+      - 5900-5999
     baseline_settle_seconds: 300 # Wait this long after boot before taking the baseline,
                                 # otherwise late-starting services look like new ports
     check_system_updates: true  # Pending apt/dnf packages + reboot-required flag
@@ -583,7 +592,7 @@ a pytest suite that runs without a config file or root privileges:
 
 ```bash
 pip install -r requirements-dev.txt
-python3 -m pytest        # 102 tests
+python3 -m pytest        # 112 tests
 ```
 
 These tests guard the git auto-update mechanism: a logic regression that would
